@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/observer/db.ts", "src/observer/filter.ts", "src/observer/types.ts"]
+}

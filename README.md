@@ -16,10 +16,12 @@ A fully independent WhatsApp channel plugin for [OpenClaw](https://openclaw.ai) 
 - **Contact directory** — automatically collects contact names and group metadata from WhatsApp events
 - **FTS5 search** — full-text search index for fast queries on large message databases
 
+The channel runtime is based on the official WhatsApp implementation at OpenClaw `v2026.11.3`. See [UPSTREAM.md](./UPSTREAM.md) for provenance and validation details.
+
 ## Prerequisites
 
-- OpenClaw installed and running (`>=2026.3.22`)
-- Node.js 22+
+- OpenClaw installed and running (`>=2026.11.3`)
+- Node.js 24.16+ on the 24.x line, or 26.1+ (matching OpenClaw 2026.11.3)
 - A WhatsApp account to link (personal or business)
 
 ## Quick Start
@@ -27,7 +29,7 @@ A fully independent WhatsApp channel plugin for [OpenClaw](https://openclaw.ai) 
 ```bash
 # 1. Clone
 git clone https://github.com/FroeMic/wa-pro.git
-cd openclaw-whatsapp-observer-plugin
+cd wa-pro
 
 # 2. Install (backs up config, disables built-in whatsapp, installs wa-pro CLI)
 bash scripts/install.sh
@@ -57,13 +59,13 @@ bash scripts/install.sh [--migrate | --no-migrate]
 | *(none)* | Prompted interactively if existing whatsapp config is found |
 
 The install script:
-1. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
-2. Records whether the built-in whatsapp plugin was previously enabled
-3. Disables the built-in whatsapp plugin and cleans up stale config entries
-4. Installs the plugin via `openclaw plugins install`
-5. Installs root + CLI npm dependencies
-6. Links the `wa-pro` binary to `/usr/local/bin`
-7. Installs `tsx` globally if not present
+1. Installs root and CLI production dependencies
+2. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
+3. Records whether the built-in whatsapp plugin was previously enabled
+4. Disables the official whatsapp plugin explicitly and removes its channel config
+5. Installs the plugin via `openclaw plugins install --force --accept-capabilities`
+6. Links the `wa-pro` executable to `/usr/local/bin`
+7. Uses the CLI's own TypeScript loader; no global `tsx` install is needed
 
 Existing config (accounts, policies, observer settings) is preserved across reinstalls.
 
@@ -106,7 +108,7 @@ All query commands output JSON by default. Use `--format table` for human-readab
 
 ```bash
 # Full-text search
-wa-pro search "<query>" [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
+wa-pro search "<query>" [--account <id>] [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
 
 # Chronological conversation history (oldest first, max 500)
 wa-pro history <conversation-jid> [--account <id>] [--after <date>] [--before <date>] [--limit <N>]
@@ -145,7 +147,7 @@ wa-pro contacts [--account <id>] [--groups] [--people] [--format table]
 
 ### Observer Config Commands
 
-Settings are stored in the observer database and take effect immediately — no gateway restart needed.
+Settings are stored in the observer database and take effect on the next query or message. Retention pruning runs every five seconds for each connected account. No gateway restart is needed.
 
 All config commands support `--account <id>` for per-account overrides. Without `--account`, they set/show global defaults. Use `--reset --account <id>` to remove an override and fall back to global.
 
@@ -157,10 +159,10 @@ wa-pro config show [--account <id>]
 wa-pro config mode [<mode>] [--account <id>] [--reset]
 
 # Allowlist management
-wa-pro config allowlist list|add|remove|clear [<entry>] [--account <id>] [--reset]
+wa-pro config allowlist [list|add|remove|clear] [<entry>] [--account <id>] [--reset]
 
 # Blocklist management
-wa-pro config blocklist list|add|remove|clear [<entry>] [--account <id>] [--reset]
+wa-pro config blocklist [list|add|remove|clear] [<entry>] [--account <id>] [--reset]
 
 # Retention period (days, 0 = forever)
 wa-pro config retention [<days>] [--account <id>] [--reset]
@@ -220,6 +222,8 @@ Observer settings (mode, filters, retention) live in the SQLite database at `~/.
 - **Global defaults** — apply to all accounts unless overridden
 - **Per-account overrides** — take precedence over global for that account
 
+The gateway and CLI share a native SQLite database in WAL mode. Existing sql.js databases are opened in place, and contacts and FTS indexes are migrated automatically. `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH` are honored by the CLI and scripts. Retention removes message rows; downloaded media files remain on disk.
+
 On first startup, global defaults are seeded from `openclaw.json` if present. After that, the database is the source of truth.
 
 ## Architecture
@@ -241,7 +245,8 @@ openclaw-whatsapp-observer-plugin/
       monitor.ts              # Normal account Baileys listener (with observer tap)
     auto-reply/               # Agent pipeline (unchanged from upstream)
   cli/
-    bin/run.ts                # CLI entry point (#!/usr/bin/env tsx)
+    bin/run.mjs               # CLI executable with its own TypeScript loader
+    bin/run.ts                # oclif entry point
     src/
       commands/               # oclif commands
         search.ts, recent.ts, history.ts, conversations.ts, stats.ts
@@ -254,7 +259,7 @@ openclaw-whatsapp-observer-plugin/
     install.sh                # Install with config migration
     uninstall.sh              # Uninstall with config restoration
     setup.sh                  # Account setup (normal/observer)
-  test/                       # 74 Vitest tests
+  test/                       # Compatibility, storage, capture, CLI, and migration tests
 ```
 
 ### Message Flow
@@ -281,7 +286,7 @@ WhatsApp --> Baileys --> Observer DB (+ optional media) --> done
 
 Observer accounts are prevented from sending messages at three layers:
 
-1. **No send wiring** — the observer Baileys socket never calls `sendMessage`
+1. **Socket send guard** — observer sockets reject all `sendMessage` calls
 2. **No agent pipeline** — observer messages bypass session creation entirely
 3. **`message_sending` hook** — a lifecycle hook blocks any outbound attempt on observer accounts (priority 9999)
 
@@ -298,12 +303,19 @@ Observer accounts are prevented from sending messages at three layers:
 ## Development
 
 ```bash
-# Run all tests (74 tests across 4 suites)
-npx vitest run
+# Install development dependencies
+npm ci
+(cd cli && npm ci)
+
+# Check storage types, SDK exports, and TypeScript syntax against OpenClaw 2026.11.3
+npm run check
+
+# Run unit and integration tests
+npm test
 
 # Test CLI locally
-cd cli && npx tsx bin/run.ts --help
-cd cli && npx tsx bin/run.ts search "hello" --format table
+node cli/bin/run.mjs --help
+node cli/bin/run.mjs search "hello" --format table
 
 # Quick deploy to server (without full reinstall)
 git pull
@@ -316,11 +328,12 @@ openclaw gateway restart
 To clear all messages, contacts, and settings and start fresh:
 
 ```bash
-rm ~/.openclaw/whatsapp-observer/messages.db
+openclaw gateway stop
+rm -f ~/.openclaw/whatsapp-observer/messages.db{,-wal,-shm}
 openclaw gateway restart
 ```
 
-The DB is recreated automatically on gateway startup.
+The DB is recreated automatically on gateway startup. Stop the gateway before resetting storage; SQLite also uses `messages.db-wal` and `messages.db-shm` while open.
 
 ## License
 

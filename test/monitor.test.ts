@@ -25,7 +25,7 @@ describe("Observer Monitor", () => {
     it("exports only expected functions", async () => {
       const monitorModule = await import("../src/observer/monitor.js");
       const exportedNames = Object.keys(monitorModule).sort();
-      expect(exportedNames).toEqual(["getObserverSocket", "processObserverMessage", "requestBackfill", "startObserverMonitor"]);
+      expect(exportedNames).toEqual(["attachObserverListeners", "getObserverSocket", "processObserverMessage", "requestBackfill", "startObserverMonitor"]);
     });
   });
 });

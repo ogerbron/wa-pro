@@ -1,7 +1,5 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { resolveDbPath, openDb } from "../lib/db-reader.js";
-import { readObserverConfig } from "../lib/config-reader.js";
-import { adjustLimitForFiltering, applyRetrieveFilter } from "../lib/query-filter.js";
 import { printOutput, type OutputFormat } from "../lib/output.js";
 
 export default class Search extends Command {
@@ -19,6 +17,7 @@ export default class Search extends Command {
   };
 
   static override flags = {
+    account: Flags.string({ description: "Filter by account ID" }),
     sender: Flags.string({ description: "Filter by sender (name, E.164 number, or JID)" }),
     group: Flags.string({ description: "Filter by group (name or JID)" }),
     after: Flags.string({ description: "Only messages after this date (ISO 8601)" }),
@@ -38,19 +37,19 @@ export default class Search extends Command {
 
     const dbPath = resolveDbPath(flags.db);
     const db = await openDb(dbPath);
-    const config = readObserverConfig();
 
     try {
       const results = db.searchFts({
         query: args.query,
+        accountId: flags.account,
         sender: flags.sender,
         group: flags.group,
         afterDate: flags.after ? new Date(flags.after).getTime() : undefined,
         beforeDate: flags.before ? new Date(flags.before).getTime() : undefined,
-        limit: adjustLimitForFiltering(limit, config.mode),
+        limit: limit,
       });
 
-      const filtered = applyRetrieveFilter(results, config.mode, config.filters).slice(0, limit);
+      const filtered = results;
 
       printOutput(filtered, flags.format as OutputFormat, [
         { key: "account_id", header: "Account", width: 12 },

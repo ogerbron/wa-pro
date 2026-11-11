@@ -1,8 +1,5 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { resolveDbPath, openDb } from "../lib/db-reader.js";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 
 export default class Backfill extends Command {
   static override description =
@@ -29,14 +26,17 @@ export default class Backfill extends Command {
       description: "Observer account ID (must be connected to gateway)",
     }),
     count: Flags.integer({
+      min: 1, max: 50,
       default: 50,
       description: "Messages per request (max 50)",
     }),
     requests: Flags.integer({
+      min: 1,
       default: 1,
       description: "Number of sequential backfill requests",
     }),
     wait: Flags.integer({
+      min: 0,
       default: 10,
       description: "Seconds to wait between requests",
     }),

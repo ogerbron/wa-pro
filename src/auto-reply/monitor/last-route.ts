@@ -1,20 +1,21 @@
-import type { loadConfig } from "openclaw/plugin-sdk/config-runtime";
-import { resolveStorePath, updateLastRoute } from "openclaw/plugin-sdk/config-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 import { formatError } from "../../session.js";
+import { resolveStorePath, updateLastRoute } from "../config.runtime.js";
 
 export function trackBackgroundTask(
   backgroundTasks: Set<Promise<unknown>>,
   task: Promise<unknown>,
 ) {
   backgroundTasks.add(task);
-  void task.finally(() => {
+  const cleanup = () => {
     backgroundTasks.delete(task);
-  });
+  };
+  task.then(cleanup, cleanup);
 }
 
 export function updateLastRouteInBackground(params: {
-  cfg: ReturnType<typeof loadConfig>;
+  cfg: OpenClawConfig;
   backgroundTasks: Set<Promise<unknown>>;
   storeAgentId: string;
   sessionKey: string;
@@ -22,7 +23,7 @@ export function updateLastRouteInBackground(params: {
   to: string;
   accountId?: string;
   ctx?: MsgContext;
-  warn: (obj: unknown, msg: string) => void;
+  warn: (obj: object, msg: string) => void;
 }) {
   const storePath = resolveStorePath(params.cfg.session?.store, {
     agentId: params.storeAgentId,
@@ -36,7 +37,7 @@ export function updateLastRouteInBackground(params: {
       accountId: params.accountId,
     },
     ctx: params.ctx,
-  }).catch((err) => {
+  }).catch((err: unknown) => {
     params.warn(
       {
         error: formatError(err),
@@ -48,13 +49,4 @@ export function updateLastRouteInBackground(params: {
     );
   });
   trackBackgroundTask(params.backgroundTasks, task);
-}
-
-export function awaitBackgroundTasks(backgroundTasks: Set<Promise<unknown>>) {
-  if (backgroundTasks.size === 0) {
-    return Promise.resolve();
-  }
-  return Promise.allSettled(backgroundTasks).then(() => {
-    backgroundTasks.clear();
-  });
 }

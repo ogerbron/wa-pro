@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { WAMessage, proto } from "@whiskeysockets/baileys";
-import { downloadMediaMessage, normalizeMessageContent } from "@whiskeysockets/baileys";
+import type { WAMessage, proto, WASocket } from "baileys";
+import { downloadMediaMessage, normalizeMessageContent } from "baileys";
 
 const MIME_TO_EXT: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -61,7 +61,7 @@ export function detectMediaType(
 
 export async function downloadAndStoreMedia(
   msg: WAMessage,
-  sock: { updateMediaMessage: (msg: WAMessage) => Promise<proto.IWebMessageInfo>; logger: unknown },
+  sock: Pick<WASocket, "updateMediaMessage" | "logger">,
   mediaBasePath: string,
 ): Promise<{ localPath: string; mime?: string } | undefined> {
   try {
@@ -90,7 +90,7 @@ export async function downloadAndStoreMedia(
     await mkdir(dir, { recursive: true });
 
     const fileName =
-      message.documentMessage?.fileName ?? `${randomUUID()}${ext}`;
+      `${randomUUID()}${ext}`;
     const localPath = join(dir, fileName);
     await writeFile(localPath, buffer);
 

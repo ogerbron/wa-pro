@@ -32,7 +32,7 @@ Do NOT confuse with normal WhatsApp chat routing — this is for querying the pa
 ### Search messages
 
 ```bash
-wa-pro search "<query>" [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
+wa-pro search "<query>" [--account <id>] [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
 ```
 
 ### Conversation history
@@ -145,7 +145,7 @@ All config commands support `--account <id>` for per-account overrides. Without 
 
 ## Notes
 
-- Output is JSON by default for query commands, table for accounts/config. Use `--format` to override.
+- Query and account commands output JSON by default. Use `--format table` for tables. Config commands print their setting or a confirmation.
 - All query outputs include the `account_id` field to distinguish WhatsApp accounts.
 - Dates use ISO 8601 format (e.g., `2026-03-01`).
 - JIDs: direct chats look like `<number>@s.whatsapp.net`; groups look like `<id>@g.us`.

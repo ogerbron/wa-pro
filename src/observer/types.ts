@@ -35,6 +35,7 @@ export type MessageSource = "observer" | "pipeline";
 
 export type ObserverMessage = {
   messageId?: string;
+  fromMe?: boolean;
   accountId: string;
   sender: string;
   senderName?: string;

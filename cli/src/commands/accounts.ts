@@ -15,7 +15,7 @@ export default class Accounts extends Command {
     db: Flags.string({ env: "WA_PRO_DB", description: "Path to observer SQLite database" }),
     format: Flags.string({
       options: ["json", "table"],
-      default: "table",
+      default: "json",
       description: "Output format",
     }),
   };

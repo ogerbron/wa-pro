@@ -1,3 +1,5 @@
+import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import { join } from "node:path";
 import type { WhatsAppProChannelConfig } from "./channel-config.js";
 import { DEFAULT_OBSERVER_MODE, OBSERVER_MODES, type ObserverConfig, type ObserverMode, type ObserverSettings } from "./observer/types.js";
 
@@ -16,8 +18,8 @@ export function parseObserverConfig(
 ): ObserverConfig {
   const raw = channelConfig?.observer;
 
-  const dbPath = typeof raw?.dbPath === "string" ? raw.dbPath : DEFAULT_DB_PATH;
-  const mediaPath = typeof raw?.mediaPath === "string" ? raw.mediaPath : DEFAULT_MEDIA_PATH;
+  const dbPath = typeof raw?.dbPath === "string" ? raw.dbPath : process.env.OPENCLAW_STATE_DIR ? join(process.env.OPENCLAW_STATE_DIR, "whatsapp-observer", "messages.db") : DEFAULT_DB_PATH;
+  const mediaPath = typeof raw?.mediaPath === "string" ? raw.mediaPath : process.env.OPENCLAW_STATE_DIR ? join(process.env.OPENCLAW_STATE_DIR, "whatsapp-observer", "media") : DEFAULT_MEDIA_PATH;
 
   // Observer account IDs
   const observerAccounts = Array.isArray(raw?.accounts) ? raw.accounts : [];
@@ -51,5 +53,6 @@ export function parseObserverSettingsFromConfig(
 }
 
 export function isObserverAccount(accountId: string, config: { observerAccounts: string[] }): boolean {
-  return config.observerAccounts.includes(accountId);
+  const normalized = normalizeAccountId(accountId);
+  return config.observerAccounts.some(id => normalizeAccountId(id) === normalized);
 }

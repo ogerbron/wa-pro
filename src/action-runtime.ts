@@ -1,13 +1,13 @@
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import { resolveAuthorizedWhatsAppOutboundTarget } from "./action-runtime-target-auth.js";
-import { getChannelConfig } from "./channel-config.js";
+import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
 import {
   createActionGate,
   jsonResult,
   readReactionParams,
   readStringParam,
-  type OpenClawConfig,
-} from "./runtime-api.js";
+} from "openclaw/plugin-sdk/channel-actions";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveAuthorizedWhatsAppOutboundTarget } from "./action-runtime-target-auth.js";
+import { resolveWhatsAppReactionLevel } from "./reaction-level.js";
 import { sendReactionWhatsApp } from "./send.js";
 
 export const whatsAppActionRuntime = {
@@ -20,11 +20,23 @@ export async function handleWhatsAppAction(
   cfg: OpenClawConfig,
 ): Promise<AgentToolResult<unknown>> {
   const action = readStringParam(params, "action", { required: true });
-  const isActionEnabled = createActionGate(getChannelConfig(cfg)?.actions);
+  const whatsAppConfig = cfg.channels?.["whatsapp-pro"];
+  const isActionEnabled = createActionGate(whatsAppConfig?.actions);
 
   if (action === "react") {
-    if (!isActionEnabled("reactions")) {
+    const accountId = readStringParam(params, "accountId");
+    if (!whatsAppConfig || !isActionEnabled("reactions")) {
       throw new Error("WhatsApp reactions are disabled.");
+    }
+    const reactionLevelInfo = resolveWhatsAppReactionLevel({
+      cfg,
+      accountId: accountId ?? undefined,
+    });
+    if (!reactionLevelInfo.agentReactionsEnabled) {
+      throw new Error(
+        `WhatsApp agent reactions disabled (reactionLevel="${reactionLevelInfo.level}"). ` +
+          `Set channels.whatsapp-pro.reactionLevel to "minimal" or "extensive" to enable.`,
+      );
     }
     const chatJid = readStringParam(params, "chatJid", { required: true });
     const messageId = readStringParam(params, "messageId", { required: true });
@@ -32,7 +44,6 @@ export async function handleWhatsAppAction(
       removeErrorMessage: "Emoji is required to remove a WhatsApp reaction.",
     });
     const participant = readStringParam(params, "participant");
-    const accountId = readStringParam(params, "accountId");
     const fromMeRaw = params.fromMe;
     const fromMe = typeof fromMeRaw === "boolean" ? fromMeRaw : undefined;
 
@@ -50,6 +61,7 @@ export async function handleWhatsAppAction(
       fromMe,
       participant: participant ?? undefined,
       accountId: resolved.accountId,
+      cfg,
     });
     if (!remove && !isEmpty) {
       return jsonResult({ ok: true, added: emoji });

@@ -1,3 +1,4 @@
+import { readAccounts } from "../lib/account-reader.js";
 import { Args, Command, Flags } from "@oclif/core";
 import { existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -8,13 +9,13 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   type ConnectionState,
-} from "@whiskeysockets/baileys";
+} from "baileys";
 
 type OutputFormat = "qr" | "text" | "json";
 
 const CREDENTIAL_DIRS = [
-  join(homedir(), ".openclaw", "credentials", "whatsapp"),
-  join(homedir(), ".openclaw", "oauth", "whatsapp"),
+  join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "credentials", "whatsapp"),
+  join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "oauth", "whatsapp"),
 ];
 
 export default class Setup extends Command {
@@ -57,9 +58,10 @@ export default class Setup extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Setup);
     const format = flags.format as OutputFormat;
-    const accountId = args.account;
+    const accountId = args.account.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(accountId)) this.error("Account ID must use letters, digits, underscores or hyphens");
 
-    const authDir = resolveAuthDir(accountId);
+    const authDir = readAccounts(undefined).find(account => account.accountId === accountId)?.authDir ?? resolveAuthDir(accountId);
 
     // Check if already linked
     if (!flags.force && hasCredentials(authDir)) {
@@ -101,45 +103,59 @@ export default class Setup extends Command {
       qrResolve = resolve;
     });
 
-    const sock = makeWASocket({
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, silentLogger as never),
-      },
-      version,
-      logger: silentLogger as never,
-      printQRInTerminal: false,
-      browser: ["wa-pro", "setup", "1.0.0"],
-      syncFullHistory: false,
-      markOnlineOnConnect: false,
-    });
-
-    sock.ev.on("creds.update", saveCreds);
-
     let connected = false;
+    let stopped = false;
+    let restarts = 0;
     let connectionError: string | undefined;
+    let credsSave = Promise.resolve();
+    const connect = (): ReturnType<typeof makeWASocket> => {
+      const next = makeWASocket({
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, silentLogger as never),
+        },
+        version,
+        logger: silentLogger as never,
+        printQRInTerminal: false,
+        browser: ["wa-pro", "setup", "1.0.0"],
+        syncFullHistory: false,
+        markOnlineOnConnect: false,
+      });
 
-    sock.ev.on("connection.update", (update: Partial<ConnectionState>) => {
-      if (update.qr && qrResolve) {
-        qrResolve(update.qr);
-        qrResolve = null;
-      }
-      if (update.connection === "open") {
-        connected = true;
-      }
-      if (update.connection === "close") {
-        connectionError = String(update.lastDisconnect?.error ?? "Connection closed");
-      }
-    });
+      next.ev.on("creds.update", () => {
+        credsSave = credsSave.then(() => saveCreds()).catch(error => { connectionError = String(error); });
+      });
+      next.ev.on("connection.update", (update: Partial<ConnectionState>) => {
+        if (update.qr && qrResolve) {
+          qrResolve(update.qr);
+          qrResolve = null;
+        }
+        if (update.connection === "open") connected = true;
+        if (update.connection === "close") {
+          const status = (update.lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
+          // A successful first pairing requires a fresh socket with the saved credentials.
+          if (status === 515 && restarts++ < 2) {
+            void credsSave.then(() => { if (!stopped) sock = connect(); }).catch(error => { connectionError = String(error); });
+          } else {
+            connectionError = String(update.lastDisconnect?.error ?? "Connection closed");
+          }
+        }
+      });
+      return next;
+    };
+    let sock = connect();
 
     // Wait for QR
     const timeoutMs = flags.timeout * 1000;
+    let qrTimeout: ReturnType<typeof setTimeout> | undefined;
     const qrText = await Promise.race([
       qrPromise,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      new Promise<null>((resolve) => { qrTimeout = setTimeout(() => resolve(null), timeoutMs); }),
     ]);
 
+    clearTimeout(qrTimeout);
     if (!qrText) {
+      stopped = true;
       if (format === "json") {
         process.stdout.write(JSON.stringify({ status: "timeout", error: "QR code generation timed out" }) + "\n");
       } else {
@@ -154,9 +170,7 @@ export default class Setup extends Command {
     if (format === "qr") {
       process.stdout.write("Scan this QR code in WhatsApp > Linked Devices > Link a Device:\n\n");
       const { default: qrTerminal } = await import("qrcode-terminal");
-      qrTerminal.generate(qrText, { small: true }, (output: string) => {
-        process.stdout.write(output + "\n");
-      });
+      qrTerminal.generate(qrText, { small: true }, (output: string) => process.stdout.write(output + "\n"));
       process.stdout.write("\nWaiting for scan...\n");
     } else if (format === "text") {
       process.stdout.write(qrText + "\n");
@@ -174,9 +188,11 @@ export default class Setup extends Command {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 
+    stopped = true;
+    await credsSave;
     try { sock.ws?.close(); } catch { /* ignore */ }
 
-    if (connected) {
+    if (connected && !connectionError) {
       const self = readSelfId(authDir);
       if (format === "json") {
         process.stdout.write(JSON.stringify({
@@ -214,8 +230,8 @@ function hasCredentials(authDir: string): boolean {
   try {
     const credsPath = join(authDir, "creds.json");
     if (!existsSync(credsPath)) return false;
-    const data = readFileSync(credsPath);
-    return data.length > 1;
+    const data = JSON.parse(readFileSync(credsPath, "utf8"));
+    return data.registered === true && typeof data.me?.id === "string";
   } catch {
     return false;
   }

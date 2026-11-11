@@ -1,3 +1,5 @@
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+
 function safeStringify(value: unknown, limit = 800): string {
   try {
     const seen = new WeakSet();
@@ -8,9 +10,7 @@ function safeStringify(value: unknown, limit = 800): string {
           return v.toString();
         }
         if (typeof v === "function") {
-          const maybeName = (v as { name?: unknown }).name;
-          const name =
-            typeof maybeName === "string" && maybeName.length > 0 ? maybeName : "anonymous";
+          const name = typeof v.name === "string" && v.name.length > 0 ? v.name : "anonymous";
           return `[Function ${name}]`;
         }
         if (typeof v === "object" && v) {
@@ -26,7 +26,7 @@ function safeStringify(value: unknown, limit = 800): string {
     if (!raw) {
       return String(value);
     }
-    return raw.length > limit ? `${raw.slice(0, limit)}…` : raw;
+    return raw.length > limit ? `${truncateUtf16Safe(raw, limit)}…` : raw;
   } catch {
     return String(value);
   }
@@ -46,12 +46,12 @@ function extractBoomDetails(err: unknown): {
   if (!output || typeof output !== "object") {
     return null;
   }
-  const payload = (output as { payload?: unknown }).payload as
+  const payload = output.payload as
     | { error?: unknown; message?: unknown; statusCode?: unknown }
     | undefined;
   const statusCode =
-    typeof (output as { statusCode?: unknown }).statusCode === "number"
-      ? ((output as { statusCode?: unknown }).statusCode as number)
+    typeof output.statusCode === "number"
+      ? output.statusCode
       : typeof payload?.statusCode === "number"
         ? payload.statusCode
         : undefined;
@@ -99,8 +99,10 @@ export function formatError(err: unknown): string {
     typeof (err as { error?: { message?: unknown } })?.error?.message === "string"
       ? ((err as { error?: { message?: unknown } }).error?.message as string)
       : undefined,
-  ].filter((value): value is string => Boolean(value && value.trim().length > 0));
-  const message = messageCandidates[0];
+  ];
+  const message = messageCandidates.find((value): value is string =>
+    Boolean(value && value.trim().length > 0),
+  );
 
   const pieces: string[] = [];
   if (typeof status === "number") {

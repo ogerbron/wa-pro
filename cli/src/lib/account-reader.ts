@@ -1,3 +1,4 @@
+import JSON5 from "json5";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -31,11 +32,11 @@ type RawAccountConfig = {
   groups?: Record<string, unknown>;
 };
 
-const DEFAULT_CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
+const DEFAULT_CONFIG_PATH = join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "openclaw.json");
 // Try both known credential paths — the SDK's resolveOAuthDir() may return either
 const CREDENTIAL_DIRS = [
-  join(homedir(), ".openclaw", "credentials", "whatsapp"),
-  join(homedir(), ".openclaw", "oauth", "whatsapp"),
+  join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "credentials", "whatsapp"),
+  join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "oauth", "whatsapp"),
 ];
 
 /**
@@ -46,11 +47,11 @@ export function readAccounts(
   db: ObserverDB | undefined,
   configPath?: string,
 ): AccountInfo[] {
-  const filePath = configPath ?? DEFAULT_CONFIG_PATH;
+  const filePath = configPath ?? process.env.OPENCLAW_CONFIG_PATH ?? DEFAULT_CONFIG_PATH;
 
   let config: Record<string, unknown>;
   try {
-    config = JSON.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>;
+    config = JSON5.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>;
   } catch {
     return [];
   }
