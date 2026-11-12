@@ -13,6 +13,12 @@ for arg in "$@"; do
     *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
+echo 'Stopping the OpenClaw gateway for offline plugin installation...'
+if ! openclaw gateway stop --force; then
+  echo 'Could not stop the gateway. No dependencies or configuration were changed.' >&2
+  echo 'Stop it through its service owner, inspect openclaw gateway status --deep, then rerun this installer.' >&2
+  exit 1
+fi
 (cd "$PLUGIN_DIR" && npm ci --omit=dev --no-fund --no-audit)
 (cd "$PLUGIN_DIR/cli" && npm ci --omit=dev --no-fund --no-audit)
 if [ -z "$MIGRATE" ]; then

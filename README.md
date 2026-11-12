@@ -59,15 +59,19 @@ bash scripts/install.sh [--migrate | --no-migrate]
 | *(none)* | Prompted interactively if existing whatsapp config is found |
 
 The install script:
-1. Installs root and CLI production dependencies
-2. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
-3. Records whether the built-in whatsapp plugin was previously enabled
-4. Disables the official whatsapp plugin explicitly and removes its channel config
-5. Installs the plugin via `openclaw plugins install --force --accept-capabilities`
-6. Links the `wa-pro` executable to `/usr/local/bin`
-7. Uses the CLI's own TypeScript loader; no global `tsx` install is needed
+1. Stops the gateway through `openclaw gateway stop --force` before changing dependencies or configuration; aborts if stopping fails
+2. Installs root and CLI production dependencies
+3. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
+4. Records whether the built-in whatsapp plugin was previously enabled
+5. Disables the official whatsapp plugin explicitly and removes its channel config
+6. Installs the plugin via `openclaw plugins install --force --accept-capabilities`
+7. Links the `wa-pro` executable to `/usr/local/bin`
+8. Uses the CLI's own TypeScript loader; no global `tsx` install is needed
 
 Existing config (accounts, policies, observer settings) is preserved across reinstalls.
+The gateway stays stopped for account setup; restart it afterward with `openclaw gateway restart`.
+
+If installation reports "requires exclusive offline state ownership", stop the gateway through its service owner and wait for shutdown before retrying. For a managed service, run `openclaw gateway stop --force`. If it cannot stop, inspect `openclaw gateway status --deep` and stop the service using the supervisor shown there.
 
 ## Account Setup
 
