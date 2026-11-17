@@ -45,12 +45,16 @@ would not preserve the current contracts. The runtime update retains the
 
 - `npm test`: storage, separate-process CLI operations, wire event capture,
   observer send protection/startup, pairing restart, and config migration tests.
+- Packaging tests build and pack both JavaScript entries, then load all emitted
+  chunks with plain Node after removing TypeScript sources from the extracted package.
 - `npm run check`: strict storage type checking, syntax/transpilation checks,
   manifest/runtime schema equality, and actual named exports from the target SDK.
 - Root and CLI lockfiles accept `npm ci --dry-run --ignore-scripts`.
 - `bash -n scripts/install.sh scripts/setup.sh scripts/uninstall.sh`.
 - OpenClaw 2026.11.3 native config validation: valid, no warnings.
-- Native local plugin install/list: loaded, no diagnostics.
+- Native installation verified in isolated state directories using both a compiled
+  `npm-pack:` archive and the installer's local-directory command. Runtime inspection
+  of the archive reports `dist/index.js` as loaded, with no diagnostics.
 - Isolated gateway smoke test with every WhatsApp account disabled: HTTP startup
   included `whatsapp-pro`, the observer service created its database, and SIGTERM
   shut down without plugin errors. The user's active configuration was not used.

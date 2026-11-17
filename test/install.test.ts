@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 const fixtures: string[] = [];
 afterEach(() => fixtures.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })));
 
-function install(options: { stopFails?: boolean; installFails?: boolean; alreadyStopped?: boolean } = {}) {
+function install(options: { stopFails?: boolean; installFails?: boolean; buildFails?: boolean; alreadyStopped?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "wa-install-"));
   fixtures.push(dir);
   const plugin = join(dir, "plugin");
@@ -38,6 +38,8 @@ if [ "$1 $2" = 'gateway stop' ]; then
   touch "$STOPPED_MARKER"
 elif [ "$1 $2" = 'plugins install' ]; then
   test -f "$STOPPED_MARKER"
+  test -f "$INSTALL_PLUGIN_DIR/dist/index.js"
+  test -f "$INSTALL_PLUGIN_DIR/dist/setup-entry.js"
   if [ "$INSTALL_FAILS" = 1 ]; then echo 'plugin install failed' >&2; exit 1; fi
 fi
 `, { mode: 0o755 });
@@ -45,6 +47,11 @@ fi
 set -euo pipefail
 test -f "$STOPPED_MARKER"
 printf 'npm %s %s\\n' "$(basename "$PWD")" "$*" >> "$INSTALL_TRACE"
+if [ "$1 $2" = 'run build' ]; then
+  if [ "$BUILD_FAILS" = 1 ]; then echo 'compilation failed' >&2; exit 1; fi
+  mkdir -p dist
+  touch dist/index.js dist/setup-entry.js
+fi
 `, { mode: 0o755 });
   // Exercise the whole installer without touching the real system CLI link.
   writeFileSync(join(bin, "ln"), `#!/usr/bin/env bash
@@ -59,6 +66,8 @@ printf 'link\\n' >> "$INSTALL_TRACE"
       OPENCLAW_CONFIG_PATH: configPath,
       TMPDIR: join(dir, "tmp"),
       INSTALL_TRACE: join(dir, "trace"),
+      INSTALL_PLUGIN_DIR: plugin,
+      BUILD_FAILS: options.buildFails ? "1" : "0",
       CONFIG_AT_STOP: join(dir, "config-at-stop"),
       STOPPED_MARKER: join(dir, "stopped"),
       STOP_FAILS: options.stopFails ? "1" : "0",
@@ -85,8 +94,9 @@ describe("installer offline ownership", () => {
     expect(trace[0]).toBe("openclaw gateway stop --force");
     expect(trace[1]).toMatch(/^npm plugin ci /);
     expect(trace[2]).toMatch(/^npm cli ci /);
-    expect(trace[3]).toMatch(/^openclaw plugins install --force --accept-capabilities /);
-    expect(trace[4]).toBe("link");
+    expect(trace[3]).toBe("npm plugin run build");
+    expect(trace[4]).toMatch(/^openclaw plugins install --force --accept-capabilities /);
+    expect(trace[5]).toBe("link");
     const saved = JSON.parse(config);
     expect(saved.channels["whatsapp-pro"].accounts.personal.enabled).toBe(true);
     expect(saved.plugins.entries.whatsapp.enabled).toBe(false);
@@ -106,6 +116,16 @@ describe("installer offline ownership", () => {
   it("continues when the native stop command confirms the gateway is already stopped", () => {
     const { result } = install({ alreadyStopped: true });
     expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("aborts before config migration or native installation if compilation fails", () => {
+    const { result, original, config, backup, trace } = install({ buildFails: true });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("compilation failed");
+    expect(config).toBe(original);
+    expect(backup).toBe("stale backup");
+    expect(trace).toHaveLength(4);
+    expect(trace.at(-1)).toBe("npm plugin run build");
   });
 
   it("still restores the original config if native plugin installation fails", () => {

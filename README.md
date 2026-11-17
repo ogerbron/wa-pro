@@ -61,12 +61,13 @@ bash scripts/install.sh [--migrate | --no-migrate]
 The install script:
 1. Stops the gateway through `openclaw gateway stop --force` before changing dependencies or configuration; aborts if stopping fails
 2. Installs root and CLI production dependencies
-3. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
-4. Records whether the built-in whatsapp plugin was previously enabled
-5. Disables the official whatsapp plugin explicitly and removes its channel config
-6. Installs the plugin via `openclaw plugins install --force --accept-capabilities`
-7. Links the `wa-pro` executable to `/usr/local/bin`
-8. Uses the CLI's own TypeScript loader; no global `tsx` install is needed
+3. Builds the JavaScript runtime and setup entries in `dist/`; aborts before config migration if compilation fails
+4. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
+5. Records whether the built-in whatsapp plugin was previously enabled
+6. Disables the official whatsapp plugin explicitly and removes its channel config
+7. Installs the plugin via `openclaw plugins install --force --accept-capabilities`
+8. Links the `wa-pro` executable to `/usr/local/bin`
+9. Uses the CLI's own TypeScript loader; no global `tsx` install is needed
 
 Existing config (accounts, policies, observer settings) is preserved across reinstalls.
 The gateway stays stopped for account setup; restart it afterward with `openclaw gateway restart`.
@@ -311,6 +312,9 @@ Observer accounts are prevented from sending messages at three layers:
 npm ci
 (cd cli && npm ci)
 
+# Build the JavaScript runtime and setup entries for installation
+npm run build
+
 # Check storage types, SDK exports, and TypeScript syntax against OpenClaw 2026.11.3
 npm run check
 
@@ -323,9 +327,13 @@ node cli/bin/run.mjs search "hello" --format table
 
 # Quick deploy to server (without full reinstall)
 git pull
+npm run build
 cp -r . ~/.openclaw/extensions/whatsapp-pro/
 openclaw gateway restart
 ```
+
+Copied and packaged installations load `dist/index.js` and `dist/setup-entry.js`.
+`npm pack` runs the build automatically and includes `dist/`, even though generated output is ignored by Git.
 
 ## Reset Database
 

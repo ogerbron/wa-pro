@@ -21,6 +21,7 @@ if ! openclaw gateway stop --force; then
 fi
 (cd "$PLUGIN_DIR" && npm ci --omit=dev --no-fund --no-audit)
 (cd "$PLUGIN_DIR/cli" && npm ci --omit=dev --no-fund --no-audit)
+(cd "$PLUGIN_DIR" && npm run build)
 if [ -z "$MIGRATE" ]; then
   if [ "$(node "$SCRIPT_DIR/manage-config.mjs" has-native "$CONFIG_PATH")" = yes ]; then
     read -rp 'Migrate existing WhatsApp config to WhatsApp Pro? [Y/n]: ' CHOICE
