@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 const fixtures: string[] = [];
 afterEach(() => fixtures.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })));
 
-function install(options: { stopFails?: boolean; installFails?: boolean; buildFails?: boolean; alreadyStopped?: boolean } = {}) {
+function install(options: { stopFails?: boolean; installFails?: boolean; buildFails?: boolean; packFails?: boolean; alreadyStopped?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "wa-install-"));
   fixtures.push(dir);
   const plugin = join(dir, "plugin");
@@ -40,6 +40,7 @@ elif [ "$1 $2" = 'plugins install' ]; then
   test -f "$STOPPED_MARKER"
   test -f "$INSTALL_PLUGIN_DIR/dist/index.js"
   test -f "$INSTALL_PLUGIN_DIR/dist/setup-entry.js"
+  test -f "$5"
   if [ "$INSTALL_FAILS" = 1 ]; then echo 'plugin install failed' >&2; exit 1; fi
 fi
 `, { mode: 0o755 });
@@ -51,6 +52,10 @@ if [ "$1 $2" = 'run build' ]; then
   if [ "$BUILD_FAILS" = 1 ]; then echo 'compilation failed' >&2; exit 1; fi
   mkdir -p dist
   touch dist/index.js dist/setup-entry.js
+fi
+if [ "$1" = pack ]; then
+  if [ "$PACK_FAILS" = 1 ]; then echo 'packaging failed' >&2; exit 1; fi
+  touch "\${@: -1}/whatsapp-pro-2026.11.3.tgz"
 fi
 `, { mode: 0o755 });
   // Exercise the whole installer without touching the real system CLI link.
@@ -68,6 +73,7 @@ printf 'link\\n' >> "$INSTALL_TRACE"
       INSTALL_TRACE: join(dir, "trace"),
       INSTALL_PLUGIN_DIR: plugin,
       BUILD_FAILS: options.buildFails ? "1" : "0",
+      PACK_FAILS: options.packFails ? "1" : "0",
       CONFIG_AT_STOP: join(dir, "config-at-stop"),
       STOPPED_MARKER: join(dir, "stopped"),
       STOP_FAILS: options.stopFails ? "1" : "0",
@@ -95,8 +101,9 @@ describe("installer offline ownership", () => {
     expect(trace[1]).toMatch(/^npm plugin ci /);
     expect(trace[2]).toMatch(/^npm cli ci /);
     expect(trace[3]).toBe("npm plugin run build");
-    expect(trace[4]).toMatch(/^openclaw plugins install --force --accept-capabilities /);
-    expect(trace[5]).toBe("link");
+    expect(trace[4]).toMatch(/^npm plugin pack --ignore-scripts --pack-destination /);
+    expect(trace[5]).toMatch(/^openclaw plugins install --force --accept-capabilities \/.*\/whatsapp-pro-2026\.11\.3\.tgz$/);
+    expect(trace[6]).toBe("link");
     const saved = JSON.parse(config);
     expect(saved.channels["whatsapp-pro"].accounts.personal.enabled).toBe(true);
     expect(saved.plugins.entries.whatsapp.enabled).toBe(false);
@@ -134,5 +141,15 @@ describe("installer offline ownership", () => {
     expect(result.stderr).toContain("plugin install failed");
     expect(config).toBe(original);
     expect(trace).not.toContain("link");
+  });
+
+  it("aborts before config migration when packaging fails", () => {
+    const { result, original, config, backup, trace } = install({ packFails: true });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("packaging failed");
+    expect(config).toBe(original);
+    expect(backup).toBe("stale backup");
+    expect(trace).toHaveLength(5);
+    expect(trace.at(-1)).toMatch(/^npm plugin pack /);
   });
 });

@@ -22,6 +22,14 @@ fi
 (cd "$PLUGIN_DIR" && npm ci --omit=dev --no-fund --no-audit)
 (cd "$PLUGIN_DIR/cli" && npm ci --omit=dev --no-fund --no-audit)
 (cd "$PLUGIN_DIR" && npm run build)
+INSTALL_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$INSTALL_TMP_DIR"' EXIT
+(cd "$PLUGIN_DIR" && npm pack --ignore-scripts --pack-destination "$INSTALL_TMP_DIR")
+PACKED_TARBALL=("$INSTALL_TMP_DIR"/*.tgz)
+if [ "${#PACKED_TARBALL[@]}" -ne 1 ] || [ ! -f "${PACKED_TARBALL[0]}" ]; then
+  echo 'Expected one npm package archive. Configuration was not changed.' >&2
+  exit 1
+fi
 if [ -z "$MIGRATE" ]; then
   if [ "$(node "$SCRIPT_DIR/manage-config.mjs" has-native "$CONFIG_PATH")" = yes ]; then
     read -rp 'Migrate existing WhatsApp config to WhatsApp Pro? [Y/n]: ' CHOICE
@@ -29,7 +37,7 @@ if [ -z "$MIGRATE" ]; then
   else MIGRATE=no
   fi
 fi
-SAVED_CONFIG="$(mktemp)"
+SAVED_CONFIG="$INSTALL_TMP_DIR/saved-config.json"
 node "$SCRIPT_DIR/manage-config.mjs" prepare-install "$CONFIG_PATH" "$MIGRATE" "$SAVED_CONFIG"
 restore_on_failure() {
   if [ -f "${CONFIG_PATH}.pre-whatsapp-pro.bak" ]; then
@@ -37,8 +45,9 @@ restore_on_failure() {
   fi
 }
 trap restore_on_failure ERR
-# Current OpenClaw requires --force for local source installation and upgrades.
-openclaw plugins install --force --accept-capabilities "$PLUGIN_DIR"
+# Archive installs use OpenClaw's package-manager dependency handling, including
+# existing dependency hardlinks when staging an upgrade's rollback backup.
+openclaw plugins install --force --accept-capabilities "${PACKED_TARBALL[0]}"
 node "$SCRIPT_DIR/manage-config.mjs" finish-install "$CONFIG_PATH" "$SAVED_CONFIG"
 trap - ERR
 ln -sf "$PLUGIN_DIR/cli/bin/run.mjs" /usr/local/bin/wa-pro

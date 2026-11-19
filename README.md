@@ -61,11 +61,11 @@ bash scripts/install.sh [--migrate | --no-migrate]
 The install script:
 1. Stops the gateway through `openclaw gateway stop --force` before changing dependencies or configuration; aborts if stopping fails
 2. Installs root and CLI production dependencies
-3. Builds the JavaScript runtime and setup entries in `dist/`; aborts before config migration if compilation fails
+3. Builds the JavaScript runtime and setup entries in `dist/` and creates an npm package archive; aborts before config migration if either fails
 4. Backs up `openclaw.json` (`.pre-whatsapp-pro.bak`)
 5. Records whether the built-in whatsapp plugin was previously enabled
 6. Disables the official whatsapp plugin explicitly and removes its channel config
-7. Installs the plugin via `openclaw plugins install --force --accept-capabilities`
+7. Installs the archive via `openclaw plugins install --force --accept-capabilities <archive.tgz>`
 8. Links the `wa-pro` executable to `/usr/local/bin`
 9. Uses the CLI's own TypeScript loader; no global `tsx` install is needed
 
@@ -73,6 +73,8 @@ Existing config (accounts, policies, observer settings) is preserved across rein
 The gateway stays stopped for account setup; restart it afterward with `openclaw gateway restart`.
 
 If installation reports "requires exclusive offline state ownership", stop the gateway through its service owner and wait for shutdown before retrying. For a managed service, run `openclaw gateway stop --force`. If it cannot stop, inspect `openclaw gateway status --deep` and stop the service using the supervisor shown there.
+
+If an older installer reports `Refusing to move hardlinked file` under the installed plugin's `node_modules`, rerun this updated script. It uses OpenClaw's supported npm archive installation path, which handles package-manager dependency hardlinks during upgrades. No installed dependency files or recovery backups need to be removed.
 
 ## Account Setup
 
