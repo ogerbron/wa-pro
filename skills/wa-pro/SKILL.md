@@ -71,6 +71,14 @@ wa-pro backfill <conversation-jid> --account <id> [--count <N>] [--requests <N>]
 
 Request older messages for a conversation from WhatsApp. Requires the gateway running and the phone online. Use `wa-pro conversations` to find JIDs. Default: 50 messages per request, max 50.
 
+### Transcribe a voice note
+
+```bash
+wa-pro transcribe <id>
+```
+
+Use the numeric database row `id` from recent/history JSON output. This queues work for the running gateway's background worker; it does not transcribe in the CLI or on receipt. OpenClaw's audio transcription must be configured. Read `transcript`, `transcription_status`, `transcription_error` and `transcribed_at` in recent/history JSON to check the result. The original audio row and content remain intact, and completed transcripts are searchable with `wa-pro search`. Repeat the command to retry a failed job. Active and completed jobs are not duplicated.
+
 ### List known contacts
 
 ```bash

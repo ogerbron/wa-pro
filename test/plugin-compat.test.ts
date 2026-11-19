@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ObserverDB } from "../src/observer/db.js";
@@ -16,11 +16,11 @@ vi.mock("../src/observer/monitor.js", async (original) => ({
 
 const dirs: string[] = [];
 afterEach(async () => { await closeObserver(); vi.restoreAllMocks(); vi.clearAllMocks(); dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })); });
-function register() {
+function register(runtime: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "wa-plugin-")); dirs.push(dir);
   const config = { channels: { "whatsapp-pro": { observer: { accounts: ["passive"], dbPath: join(dir, "messages.db"), mediaPath: join(dir, "media") } } } };
   const api = {
-    runtime: {}, config, resolvePath: (path: string) => path,
+    runtime, config, resolvePath: (path: string) => path,
     registerChannel: vi.fn(), registerTool: vi.fn(), registerService: vi.fn(), on: vi.fn(), registerGatewayMethod: vi.fn(),
   };
   entry.register!(api as never);
@@ -49,6 +49,26 @@ describe("OpenClaw 2026.11.3 plugin contract", () => {
     release();
     await pending;
     expect(startObserverMonitor).toHaveBeenCalledWith(expect.objectContaining({ accountId: "passive", db: expect.any(ObserverDB) }));
+  });
+
+  it("transcribes queued audio with the injected OpenClaw file API and plugin config", async () => {
+    const transcribeAudioFile = vi.fn(async () => ({ text: "Runtime transcript" }));
+    const { api, dir } = register({ mediaUnderstanding: { transcribeAudioFile } });
+    const filePath = join(dir, "voice.ogg");
+    writeFileSync(filePath, "audio fixture");
+    const db = await ObserverDB.create(join(dir, "messages.db"));
+    try {
+      db.insertMessage({ messageId: "voice", accountId: "passive", sender: "+111",
+        conversationId: "111@s.whatsapp.net", isGroup: false, content: "[audio]", mediaType: "audio",
+        mediaPath: filePath, mediaMime: "audio/ogg", timestamp: Date.now() });
+      await api.registerService.mock.calls[0][0].start();
+      expect(transcribeAudioFile).not.toHaveBeenCalled();
+      const id = Number(db.getRecent({})[0].id);
+      db.queueTranscription(id);
+      await vi.waitFor(() => expect(db.getRecent({})[0].transcription_status).toBe("completed"), { timeout: 3000 });
+      expect(transcribeAudioFile).toHaveBeenCalledExactlyOnceWith({ filePath, cfg: api.config, mime: "audio/ogg" });
+      expect(db.getRecent({})[0]).toMatchObject({ id, content: "[audio]", transcript: "Runtime transcript" });
+    } finally { db.close(); }
   });
 
   it("blocks outbound observer hooks and uses the gateway respond callback for invalid requests", async () => {

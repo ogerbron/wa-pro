@@ -10,6 +10,7 @@ import type {
   ObserverSettings,
   ObserverStats,
   StatsGroupByResult,
+  TranscriptionJob,
 } from "./types.js";
 import { DEFAULT_OBSERVER_MODE, OBSERVER_MODES } from "./types.js";
 
@@ -30,6 +31,10 @@ CREATE TABLE IF NOT EXISTS messages (
   media_type TEXT,
   media_path TEXT,
   media_mime TEXT,
+  transcript TEXT,
+  transcription_status TEXT NOT NULL DEFAULT 'none',
+  transcription_error TEXT,
+  transcribed_at INTEGER,
   message_type TEXT NOT NULL DEFAULT 'message',
   ref_message_id TEXT,
   source TEXT NOT NULL DEFAULT 'observer',
@@ -75,22 +80,22 @@ const MIGRATION_COLUMNS = [
 
 const FTS_SETUP = [
   `CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content, sender_name, group_name,
+    content, sender_name, group_name, transcript,
     content='messages', content_rowid='id'
   );`,
   `CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content, sender_name, group_name)
-    VALUES (new.id, new.content, new.sender_name, new.group_name);
+    INSERT INTO messages_fts(rowid, content, sender_name, group_name, transcript)
+    VALUES (new.id, new.content, new.sender_name, new.group_name, new.transcript);
   END;`,
   `CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name)
-    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name);
+    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name, transcript)
+    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name, old.transcript);
   END;`,
-  `CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name)
-    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name);
-    INSERT INTO messages_fts(rowid, content, sender_name, group_name)
-    VALUES (new.id, new.content, new.sender_name, new.group_name);
+  `CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF content, sender_name, group_name, transcript ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name, transcript)
+    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name, old.transcript);
+    INSERT INTO messages_fts(rowid, content, sender_name, group_name, transcript)
+    VALUES (new.id, new.content, new.sender_name, new.group_name, new.transcript);
   END;`,
 ];
 
@@ -171,18 +176,44 @@ export class ObserverDB {
         // Column already exists
       }
     }
-    const hadFts = this.query("SELECT name FROM sqlite_master WHERE name = 'messages_fts'").length > 0;
-    // Build the index for existing sql.js databases on first native SQLite open.
-    for (const stmt of FTS_SETUP) {
-      try {
-        this.run(stmt);
-        this.ftsEnabled = true;
-      } catch {
-        this.ftsEnabled = false;
-        break;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = this.query("PRAGMA table_info(messages)");
+      for (const [name, definition] of Object.entries({
+        transcript: "TEXT",
+        transcription_status: "TEXT NOT NULL DEFAULT 'none'",
+        transcription_error: "TEXT",
+        transcribed_at: "INTEGER",
+      })) {
+        if (!columns.some(column => column.name === name)) {
+          this.run(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
+        }
       }
+      this.run("CREATE INDEX IF NOT EXISTS idx_messages_transcription_pending ON messages(id) WHERE transcription_status = 'pending'");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    if (this.ftsEnabled && !hadFts) this.run("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+    // Rebuild old FTS indexes atomically so transcripts are searchable too.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const ftsColumns = this.query("PRAGMA table_info(messages_fts)");
+      const rebuild = !ftsColumns.some(column => column.name === "transcript");
+      if (ftsColumns.length && rebuild) {
+        this.db.exec(`DROP TRIGGER IF EXISTS messages_fts_insert;
+          DROP TRIGGER IF EXISTS messages_fts_delete;
+          DROP TRIGGER IF EXISTS messages_fts_update;
+          DROP TABLE messages_fts;`);
+      }
+      for (const stmt of FTS_SETUP) this.run(stmt);
+      if (rebuild) this.run("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+      this.db.exec("COMMIT");
+      this.ftsEnabled = true;
+    } catch {
+      this.db.exec("ROLLBACK");
+      this.ftsEnabled = false;
+    }
   }
 
   // ── Settings ──────────────────────────────────────────────────────
@@ -445,6 +476,43 @@ export class ObserverDB {
     );
   }
 
+  // ── Asynchronous audio transcription ─────────────────────────────
+
+  queueTranscription(id: number): Record<string, unknown> {
+    const row = this.query("SELECT * FROM visible_messages WHERE id = :id", { ":id": id })[0];
+    if (!row) throw new Error("Message not found or not visible");
+    if (row.media_type !== "audio") throw new Error("Message is not an audio message");
+    if (!row.media_path) throw new Error("Audio message has no downloaded file");
+    this.run(`UPDATE messages SET transcription_status = 'pending', transcription_error = NULL
+      WHERE id = :id AND transcription_status IN ('none', 'failed')`, { ":id": id });
+    return this.query("SELECT * FROM visible_messages WHERE id = :id", { ":id": id })[0];
+  }
+
+  /** Only the gateway's single transcription worker recovers interrupted claims. */
+  recoverInterruptedTranscriptions(): void {
+    this.run("UPDATE messages SET transcription_status = 'pending' WHERE transcription_status = 'processing'");
+  }
+
+  claimNextTranscription(): TranscriptionJob | undefined {
+    const row = this.query(`UPDATE messages SET transcription_status = 'processing'
+      WHERE id = (SELECT id FROM visible_messages WHERE transcription_status = 'pending'
+        ORDER BY id LIMIT 1) AND transcription_status = 'pending'
+      RETURNING id, media_path, media_mime`)[0];
+    return row ? { id: Number(row.id), mediaPath: String(row.media_path),
+      mediaMime: row.media_mime ? String(row.media_mime) : undefined } : undefined;
+  }
+
+  completeTranscription(id: number, text: string): void {
+    this.run(`UPDATE messages SET transcript = :text, transcription_status = 'completed',
+      transcription_error = NULL, transcribed_at = :now WHERE id = :id AND transcription_status = 'processing'`,
+    { ":id": id, ":text": text, ":now": Date.now() });
+  }
+
+  failTranscription(id: number, error: string): void {
+    this.run(`UPDATE messages SET transcription_status = 'failed', transcription_error = :error
+      WHERE id = :id AND transcription_status = 'processing'`, { ":id": id, ":error": error });
+  }
+
   /** Get pending backfill requests for an account. */
   getPendingBackfills(accountId: string): Array<{ key: string; value: Record<string, unknown> }> {
     const rows = this.query(
@@ -539,7 +607,7 @@ export class ObserverDB {
 
     const terms = params.query.split(/\s+/).filter(Boolean);
     for (let i = 0; i < terms.length; i++) {
-      conditions.push(`(m.content LIKE :term${i} OR m.sender_name LIKE :term${i} OR m.group_name LIKE :term${i})`);
+      conditions.push(`(m.content LIKE :term${i} OR m.transcript LIKE :term${i} OR m.sender_name LIKE :term${i} OR m.group_name LIKE :term${i})`);
       binds[`:term${i}`] = `%${terms[i]}%`;
     }
 
@@ -575,6 +643,7 @@ export class ObserverDB {
       SELECT m.id, m.message_id, m.account_id, m.sender, m.sender_name,
              m.sender_e164, m.conversation_id, m.is_group, m.group_id,
              m.group_name, m.content, m.media_type, m.media_path,
+             m.transcript, m.transcription_status, m.transcription_error, m.transcribed_at,
              m.timestamp, m.logged_at, m.message_type, m.ref_message_id, m.source
       FROM visible_messages m
       WHERE ${(conditions.length ? conditions.join(" AND ") : "1 = 1")}
@@ -615,6 +684,7 @@ export class ObserverDB {
       SELECT id, message_id, account_id, sender, sender_name,
              sender_e164, conversation_id, is_group, group_id,
              group_name, content, media_type, media_path,
+             transcript, transcription_status, transcription_error, transcribed_at,
              timestamp, logged_at, message_type, ref_message_id, source
       FROM visible_messages
       ${where}
@@ -655,6 +725,7 @@ export class ObserverDB {
       SELECT id, message_id, account_id, sender, sender_name,
              sender_e164, conversation_id, is_group, group_id,
              group_name, content, media_type, media_path,
+             transcript, transcription_status, transcription_error, transcribed_at,
              timestamp, logged_at, message_type, ref_message_id, source
       FROM visible_messages
       ${where}

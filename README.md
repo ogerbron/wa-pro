@@ -150,6 +150,25 @@ wa-pro accounts [--format table]
 wa-pro contacts [--account <id>] [--groups] [--people] [--format table]
 ```
 
+### Voice note transcription
+
+Voice notes are recorded as audio files by the existing observer workflow. Recording a note does not queue or run observer transcription. Request transcription explicitly using the numeric `id` from `wa-pro recent` or `wa-pro history` JSON output:
+
+```bash
+wa-pro recent --account personal
+wa-pro transcribe 123
+wa-pro history 4917600000001@s.whatsapp.net --account personal
+wa-pro search "words from the recording"
+```
+
+`wa-pro transcribe <id>` queues the request in SQLite and returns immediately with the message and its status. A separate background worker in the running gateway polls the queue every second and processes one file at a time. It calls `api.runtime.mediaUnderstanding.transcribeAudioFile({ filePath, cfg: api.config, mime })`, using OpenClaw's configured audio providers, models and credentials. Audio understanding must be enabled and a working transcription provider or CLI must be available. Requests queued while the gateway is stopped remain pending until it starts. `--db` and `WA_PRO_DB` must point to the database used by that gateway.
+
+Transcription enriches the original row with `transcript`, `transcription_status` (`none`, `pending`, `processing`, `completed`, `failed`), `transcription_error` and `transcribed_at` (Unix milliseconds). The original `content`, recording path, sender, timestamp and message ID are preserved. Transcripts are included in JSON history/recent/search results and indexed for full-text search. Table output continues to show the original message content.
+
+Repeat `wa-pro transcribe <id>` to retry a failed request. Pending, processing and completed requests are not duplicated. Missing files, provider failures and empty results are recorded as failures; the worker continues with other requests. Interrupted jobs are returned to pending when the gateway worker restarts. Run one gateway transcription worker per database; an interrupted provider call may run again after a crash.
+
+Existing databases migrate in place, including their search index. Observer transcription does not change the normal account agent pipeline's existing audio handling. Retention continues to remove message rows and their transcripts while leaving downloaded files on disk.
+
 ### Observer Config Commands
 
 Settings are stored in the observer database and take effect on the next query or message. Retention pruning runs every five seconds for each connected account. No gateway restart is needed.

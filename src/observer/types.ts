@@ -33,6 +33,12 @@ export type ObserverFilters = {
 export type MessageType = "message" | "reaction" | "poll" | "edit" | "delete";
 export type MessageSource = "observer" | "pipeline";
 
+export type TranscriptionJob = {
+  id: number;
+  mediaPath: string;
+  mediaMime?: string;
+};
+
 export type ObserverMessage = {
   messageId?: string;
   fromMe?: boolean;

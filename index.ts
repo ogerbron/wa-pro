@@ -6,6 +6,7 @@ import { getChannelConfig } from "./src/channel-config.js";
 import { parseObserverConfig, isObserverAccount } from "./src/observer-config.js";
 import { configureObserver, ensureObserverState, closeObserver, getObserverConfig } from "./src/observer/state.js";
 import { requestBackfill } from "./src/observer/monitor.js";
+import { startTranscriptionWorker } from "./src/observer/transcription.js";
 
 export { whatsappPlugin } from "./src/channel.js";
 export { setWhatsAppRuntime } from "./src/runtime.js";
@@ -27,7 +28,16 @@ export default definePluginEntry({
     // Registration also runs during config inspection. Open storage only on startup.
     api.registerService({
       id: "whatsapp-pro-observer",
-      start: async () => { await ensureObserverState(); },
+      start: async () => {
+        const { db } = await ensureObserverState();
+        startTranscriptionWorker({
+          db,
+          transcribe: (filePath, mime) => api.runtime.mediaUnderstanding.transcribeAudioFile({
+            filePath, cfg: api.config, mime,
+          }),
+          logger: api.logger,
+        });
+      },
       stop: closeObserver,
     });
     api.on("message_sending", (_event, ctx) => {
