@@ -115,7 +115,10 @@ All query commands output JSON by default. Use `--format table` for human-readab
 
 ```bash
 # Full-text search
-wa-pro search "<query>" [--account <id>] [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
+wa-pro search "<query>" [--conversation <jid>] [--account <id>] [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
+
+# All visible messages in one conversation (newest first)
+wa-pro search '*' --conversation 3333333@s.whatsapp.net
 
 # Chronological conversation history (oldest first, max 500)
 wa-pro history <conversation-jid> [--account <id>] [--after <date>] [--before <date>] [--limit <N>]

@@ -413,6 +413,7 @@ export class ObserverDB {
   /** Full-text search using FTS5 when available, LIKE fallback otherwise. */
   searchFts(params: {
     query: string;
+    conversationId?: string;
     sender?: string;
     group?: string;
     afterDate?: number;
@@ -428,6 +429,7 @@ export class ObserverDB {
 
   private searchWithFts5(params: {
     query: string;
+    conversationId?: string;
     sender?: string;
     group?: string;
     afterDate?: number;
@@ -440,6 +442,10 @@ export class ObserverDB {
       ":ftsQuery": params.query.split(/\s+/).filter(Boolean).map(t => `"${t.replaceAll('"', '""')}"`).join(" OR "),
     };
 
+    if (params.conversationId) {
+      conditions.push("m.conversation_id = :conversationId");
+      binds[":conversationId"] = params.conversationId;
+    }
     if (params.sender) {
       conditions.push("(m.sender = :sender OR m.sender_e164 = :sender OR m.sender_name LIKE :senderLike)");
       binds[":sender"] = params.sender;
@@ -595,6 +601,7 @@ export class ObserverDB {
 
   search(params: {
     query: string;
+    conversationId?: string;
     sender?: string;
     group?: string;
     afterDate?: number;
@@ -611,6 +618,10 @@ export class ObserverDB {
       binds[`:term${i}`] = `%${terms[i]}%`;
     }
 
+    if (params.conversationId) {
+      conditions.push("m.conversation_id = :conversationId");
+      binds[":conversationId"] = params.conversationId;
+    }
     if (params.sender) {
       conditions.push("(m.sender = :sender OR m.sender_e164 = :sender OR m.sender_name LIKE :senderLike)");
       binds[":sender"] = params.sender;

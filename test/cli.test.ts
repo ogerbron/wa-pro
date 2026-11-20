@@ -9,6 +9,33 @@ afterEach(() => dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, for
 const cli = (path: string, ...args: string[]) => execFileSync(process.execPath, ["cli/bin/run.mjs", ...args, "--db", path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 describe("CLI against the live database", () => {
+  it("searches by exact conversation JID with a text query or wildcard", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wa-cli-search-")); dirs.push(dir);
+    const path = join(dir, "messages.db");
+    const db = await ObserverDB.create(path);
+    const conversationId = "111@s.whatsapp.net";
+    try {
+      for (let i = 0; i < 52; i++) {
+        db.insertMessage({
+          messageId: String(i), accountId: "a", sender: "+111", conversationId,
+          isGroup: false, content: i === 0 ? "meeting" : undefined, timestamp: i + 1,
+        });
+      }
+      db.insertMessage({
+        messageId: "other", accountId: "a", sender: "+111", conversationId: "222@s.whatsapp.net",
+        isGroup: false, content: "meeting", timestamp: 100,
+      });
+      const search = (query: string, ...flags: string[]) =>
+        JSON.parse(cli(path, "search", query, "--conversation", conversationId, ...flags));
+
+      const results = search("*");
+      expect(results).toHaveLength(52);
+      expect(results.every((row: { conversation_id: string }) => row.conversation_id === conversationId)).toBe(true);
+      expect(search("*", "--limit", "1")).toMatchObject([{ message_id: "51" }]);
+      expect(search("meeting")).toMatchObject([{ message_id: "0" }]);
+    } finally { db.close(); }
+  }, 30_000);
+
   it("permanently removes an exact conversation, including filtered messages", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wa-cli-remove-")); dirs.push(dir);
     const path = join(dir, "messages.db");
