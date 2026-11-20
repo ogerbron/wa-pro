@@ -50,6 +50,6 @@ trap restore_on_failure ERR
 openclaw plugins install --force --accept-capabilities "${PACKED_TARBALL[0]}"
 node "$SCRIPT_DIR/manage-config.mjs" finish-install "$CONFIG_PATH" "$SAVED_CONFIG"
 trap - ERR
-ln -sf "$PLUGIN_DIR/cli/bin/run.mjs" /usr/local/bin/wa-pro
+sudo ln -sf "$PLUGIN_DIR/cli/bin/run.mjs" /usr/local/bin/wa-pro
 echo "Installed. Run: bash $SCRIPT_DIR/setup.sh personal"
 echo 'Then restart the gateway: openclaw gateway restart'

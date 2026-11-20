@@ -9,6 +9,36 @@ afterEach(() => dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, for
 const cli = (path: string, ...args: string[]) => execFileSync(process.execPath, ["cli/bin/run.mjs", ...args, "--db", path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 describe("CLI against the live database", () => {
+  it("permanently removes an exact conversation, including filtered messages", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wa-cli-remove-")); dirs.push(dir);
+    const path = join(dir, "messages.db");
+    const db = await ObserverDB.create(path);
+    const conversationId = "111@s.whatsapp.net";
+    const otherConversationId = "222@s.whatsapp.net";
+    try {
+      for (const [accountId, jid] of [["a", conversationId], ["b", conversationId], ["a", otherConversationId]]) {
+        db.insertMessage({
+          messageId: jid, accountId, sender: "+111", conversationId: jid,
+          isGroup: false, content: "removal test", timestamp: Date.now(),
+        });
+      }
+      db.setAccount("a", "mode", "record-all-retrieve-filtered");
+      db.setAccount("a", "filters.blocklist", JSON.stringify([conversationId]));
+      expect(db.getHistory({ accountId: "a", conversationId })).toEqual([]);
+
+      expect(cli(path, "conversations", "remove", conversationId, "--account", "a")).toContain("Removed 1");
+      db.setAccount("a", "mode", "record-all-retrieve-all");
+      expect(db.getHistory({ accountId: "a", conversationId })).toEqual([]);
+      expect(db.getHistory({ accountId: "b", conversationId })).toHaveLength(1);
+
+      expect(cli(path, "conversations", "remove", conversationId)).toContain("Removed 1");
+      expect(cli(path, "conversations", "remove", conversationId)).toContain("Removed 0");
+      expect(db.getStats({}).totalMessages).toBe(1);
+      expect(db.searchFts({ query: "removal" }).map(row => row.conversation_id)).toEqual([otherConversationId]);
+      expect(JSON.parse(cli(path, "conversations"))).toHaveLength(1);
+    } finally { db.close(); }
+  }, 30_000);
+
   it("queues audio transcription from another process without replacing the original message", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wa-cli-transcribe-")); dirs.push(dir);
     const path = join(dir, "messages.db");

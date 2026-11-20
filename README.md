@@ -126,6 +126,9 @@ wa-pro recent [--conversation <jid>] [--sender <name>] [--account <id>] [--limit
 # List conversations with message counts and contact names
 wa-pro conversations [--account <id>] [--limit <N>]
 
+# Permanently delete stored messages for a conversation (all accounts by default)
+wa-pro conversations remove <conversation-jid> [--account <id>]
+
 # Aggregate statistics with optional grouping
 wa-pro stats [--account <id>] [--after <date>] [--group-by sender|group|day|hour]
 ```

@@ -849,6 +849,17 @@ export class ObserverDB {
     return { ...stats, grouped };
   }
 
+  removeConversation(conversationId: string, accountId?: string): number {
+    const accountFilter = accountId === undefined ? "" : " AND account_id = :accountId";
+    const binds: Record<string, SQLInputValue> = accountId === undefined
+      ? { conversationId }
+      : { conversationId, accountId };
+    const result = this.db.prepare(
+      `DELETE FROM messages WHERE conversation_id = :conversationId${accountFilter}`,
+    ).run(binds);
+    return Number(result.changes);
+  }
+
   prune(retentionDays: number, accountId?: string): number {
     if (retentionDays <= 0) return 0;
     const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
