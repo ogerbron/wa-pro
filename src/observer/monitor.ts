@@ -14,11 +14,14 @@ import type { ObserverConfig, ChannelLogSink, MessageSource } from "./types.js";
 import { registerObserverCleanup } from "./state.js";
 
 // Active observer sockets keyed by accountId — used for on-demand backfill
-const activeSockets = new Map<string, ReturnType<typeof makeWASocket>>();
+const activeSockets = new Map<string, {
+  sock: ReturnType<typeof makeWASocket>;
+  backfillCutoffs: Map<string, number>;
+}>();
 
 /** Get the active Baileys socket for an observer account (if connected). */
 export function getObserverSocket(accountId: string): ReturnType<typeof makeWASocket> | undefined {
-  return activeSockets.get(accountId);
+  return activeSockets.get(accountId)?.sock;
 }
 
 /**
@@ -26,17 +29,18 @@ export function getObserverSocket(accountId: string): ReturnType<typeof makeWASo
  * Uses Baileys' fetchMessageHistory() which requests older messages from the phone.
  * Results arrive via the messaging-history.set event and are automatically processed.
  *
- * @returns Number of messages requested, or null if account not connected.
+ * @returns Number of messages requested, 0 at the cutoff, or null if the request could not be sent.
  */
 export async function requestBackfill(params: {
   accountId: string;
   conversationId: string;
   count?: number;
+  cutoffTimestamp?: number;
   db: ObserverDB;
   logger?: ChannelLogSink;
 }): Promise<number | null> {
-  const sock = activeSockets.get(params.accountId);
-  if (!sock) {
+  const connection = activeSockets.get(params.accountId);
+  if (!connection) {
     params.logger?.warn(`Backfill: account ${params.accountId} not connected`);
     return null;
   }
@@ -54,14 +58,18 @@ export async function requestBackfill(params: {
     id: oldest.message_id as string,
     fromMe: Boolean(oldest.from_me),
   };
-  const timestamp = (oldest.timestamp as number) / 1000; // Baileys uses seconds
+  const timestamp = oldest.timestamp as number;
+  if (params.cutoffTimestamp !== undefined && timestamp <= params.cutoffTimestamp) return 0;
 
   params.logger?.info(
     `Backfill: requesting ${count} messages before ${new Date(oldest.timestamp as number).toISOString()} in ${params.conversationId}`,
   );
 
   try {
-    await sock.fetchMessageHistory(count, msgKey, Math.floor(timestamp));
+    const requestId = await connection.sock.fetchMessageHistory(count, msgKey, timestamp);
+    if (params.cutoffTimestamp !== undefined) {
+      connection.backfillCutoffs.set(requestId, params.cutoffTimestamp);
+    }
     return count;
   } catch (err) {
     params.logger?.error(`Backfill failed: ${String(err)}`);
@@ -124,6 +132,7 @@ export async function processObserverMessage(
     db: ObserverDB;
     logger?: ChannelLogSink;
     source?: MessageSource;
+    cutoffTimestamp?: number;
     /** LID→E.164 lookup from Baileys signal repository (for resolving LID JIDs). */
     lidLookup?: NonNullable<Parameters<typeof import("../targets-runtime.js").resolveJidToE164>[1]>["lidLookup"];
     /** Auth dir for JID resolution fallback. */
@@ -200,7 +209,10 @@ export async function processObserverMessage(
   const rawMessage = msg.message as import("baileys").proto.IMessage | undefined;
   const normalized = normalizeMessageContent(rawMessage);
   const editTimestamp = normalized?.protocolMessage?.editedMessage ? normalized.protocolMessage.timestampMs : undefined;
-  const timestamp = Number(editTimestamp) || Number(msg.messageTimestamp) * 1000 || Date.now();
+  const messageTimestamp = Number(editTimestamp) || Number(msg.messageTimestamp) * 1000;
+  if (ctx.cutoffTimestamp !== undefined &&
+      (!Number.isFinite(messageTimestamp) || messageTimestamp < ctx.cutoffTimestamp)) return;
+  const timestamp = messageTimestamp || Date.now();
 
   // --- Reaction message ---
   const reactionMsg = normalized?.reactionMessage;
@@ -359,18 +371,23 @@ export function attachObserverListeners(
     source?: MessageSource;
   },
 ): () => Promise<void> {
+  const backfillCutoffs = new Map<string, number>();
   let pending = Promise.resolve();
   let disposed = false;
-  const process = (msg: WAMessage) => {
+  const process = (msg: WAMessage, cutoffTimestamp?: number) => {
     if (disposed) return;
     pending = pending.then(() => processObserverMessage(msg, sock, {
       ...ctx,
       lidLookup: sock.signalRepository?.lidMapping,
+      cutoffTimestamp,
     })).catch((error) => ctx.logger?.error(`Observer ${ctx.accountId}: ${String(error)}`));
   };
-  const upsert = ({ messages }: { messages: WAMessage[] }) => messages.forEach(process);
+  const upsert = ({ messages }: { messages: WAMessage[] }) => messages.forEach((msg) => process(msg));
   const history: Parameters<typeof sock.ev.on<"messaging-history.set">>[1] = (data) => {
-    upsert({ messages: data.messages ?? [] });
+    const requestId = data.peerDataRequestSessionId;
+    const cutoffTimestamp = requestId ? backfillCutoffs.get(requestId) : undefined;
+    for (const msg of data.messages ?? []) process(msg, cutoffTimestamp);
+    if (requestId && (data.progress == null || data.progress === 100)) backfillCutoffs.delete(requestId);
     contacts(data.contacts ?? []);
     for (const chat of data.chats ?? []) {
       if (chat.id && chat.name && isJidGroup(chat.id)) {
@@ -432,7 +449,7 @@ export function attachObserverListeners(
     return result;
   };
   const connection = (update: Partial<ConnectionState>) => {
-    if (update.connection === "open") activeSockets.set(ctx.accountId, sock);
+    if (update.connection === "open") activeSockets.set(ctx.accountId, { sock, backfillCutoffs });
     if (update.connection === "close") void dispose();
   };
   sock.ev.on("messages.upsert", upsert);
@@ -453,6 +470,7 @@ export function attachObserverListeners(
         if (disposed) break;
         const requested = await requestBackfill({
           ...ctx, conversationId: String(value.conversationId), count: Number(value.count) || 50,
+          cutoffTimestamp: typeof value.cutoffTimestamp === "number" ? value.cutoffTimestamp : undefined,
         });
         if (!disposed && requested !== null) ctx.db.deleteSetting(key);
       }
@@ -470,7 +488,7 @@ export function attachObserverListeners(
     disposed = true;
     unregisterCleanup();
     clearInterval(interval);
-    if (activeSockets.get(ctx.accountId) === sock) activeSockets.delete(ctx.accountId);
+    if (getObserverSocket(ctx.accountId) === sock) activeSockets.delete(ctx.accountId);
     sock.ev.off("messages.upsert", upsert);
     sock.ev.off("messaging-history.set", history);
     sock.ev.off("messages.reaction", reactions);

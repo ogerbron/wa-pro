@@ -140,13 +140,18 @@ wa-pro stats [--account <id>] [--after <date>] [--group-by sender|group|day|hour
 
 ```bash
 # Request older messages for a conversation (phone must be online)
-wa-pro backfill <conversation-jid> --account <id> [--count <N>] [--requests <N>] [--wait <seconds>]
+wa-pro backfill <conversation-jid> --account <id> [--days <N>] [--count <N>] [--requests <N>] [--wait <seconds>]
+
+# Import backfill messages from the past 7 days
+wa-pro backfill 4917600000001@s.whatsapp.net --account michael --days=7
 
 # Backfill all conversations for an account
 wa-pro conversations --account michael --format json | \
   jq -r '.[].conversationId' | \
   while read jid; do wa-pro backfill "$jid" --account michael --requests 3 --wait 10; done
 ```
+
+`--days` takes a positive whole number and applies a rolling cutoff from when the command starts. Backfill still works backward from the oldest stored message and uses the existing `--count` and `--requests` limits. The gateway must be running a version that supports `--days` to process bounded requests.
 
 ### Account & Contact Commands
 

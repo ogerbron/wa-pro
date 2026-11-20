@@ -522,8 +522,11 @@ export class ObserverDB {
   /** Get pending backfill requests for an account. */
   getPendingBackfills(accountId: string): Array<{ key: string; value: Record<string, unknown> }> {
     const rows = this.query(
-      "SELECT key, value FROM settings WHERE key LIKE :prefix",
-      { ":prefix": `backfill.pending.${accountId}.%` },
+      "SELECT key, value FROM settings WHERE key LIKE :prefix OR key LIKE :boundedPrefix",
+      {
+        ":prefix": `backfill.pending.${accountId}.%`,
+        ":boundedPrefix": `backfill.pending-bounded.${accountId}.%`,
+      },
     );
     return rows.map((row) => ({
       key: row.key as string,

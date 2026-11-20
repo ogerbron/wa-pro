@@ -191,9 +191,47 @@ describe("wire capture", () => {
     const { sock, emit } = socket();
     const dispose = attachObserverListeners(sock, { db, config, accountId: "a" });
     emit("connection.update", { connection: "open" });
-    db.insertMessage({ ...message("outbound"), fromMe: true });
+    const outbound = message("outbound");
+    db.insertMessage({ ...outbound, fromMe: true });
     expect(await requestBackfill({ db, accountId: "a", conversationId: "111@s.whatsapp.net", count: 20 })).toBe(20);
-    expect(sock.fetchMessageHistory).toHaveBeenCalledWith(20, { id: "outbound", remoteJid: "111@s.whatsapp.net", fromMe: true }, expect.any(Number));
+    expect(sock.fetchMessageHistory).toHaveBeenCalledWith(20, { id: "outbound", remoteJid: "111@s.whatsapp.net", fromMe: true }, outbound.timestamp);
     await dispose();
+  });
+
+  it("applies a queued cutoff only to its matching backfill response", async () => {
+    vi.useFakeTimers();
+    const { sock, emit } = socket();
+    const dispose = attachObserverListeners(sock, { db, config, accountId: "a" });
+    const conversationId = "111@s.whatsapp.net";
+    const cutoffTimestamp = Math.floor(Date.now() / 1000) * 1000 - 60_000;
+    const request = { conversationId, count: 20, cutoffTimestamp };
+    const wireMessage = (id: string, ageInSeconds: number) => ({
+      key: { id, remoteJid: conversationId }, message: { conversation: id },
+      messageTimestamp: cutoffTimestamp / 1000 - ageInSeconds,
+    });
+    try {
+      emit("connection.update", { connection: "open" });
+      db.insertMessage(message("anchor"));
+      db.setSetting("backfill.pending-bounded.a.first", JSON.stringify(request));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sock.fetchMessageHistory).toHaveBeenCalledTimes(1);
+      expect(db.getPendingBackfills("a")).toHaveLength(0);
+
+      emit("messaging-history.set", { peerDataRequestSessionId: "requested", messages: [
+        wireMessage("too-old", 1), wireMessage("boundary", 0), wireMessage("within-range", -1),
+      ] });
+      emit("messaging-history.set", { peerDataRequestSessionId: "other", messages: [wireMessage("unbounded", 1)] });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(db.getHistory({ conversationId }).map((row) => row.message_id))
+        .toEqual(["unbounded", "boundary", "within-range", "anchor"]);
+
+      db.setSetting("backfill.pending-bounded.a.second", JSON.stringify(request));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sock.fetchMessageHistory).toHaveBeenCalledTimes(1);
+      expect(db.getPendingBackfills("a")).toHaveLength(0);
+    } finally {
+      await dispose();
+      vi.useRealTimers();
+    }
   });
 });

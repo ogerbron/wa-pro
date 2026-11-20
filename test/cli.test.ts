@@ -107,7 +107,34 @@ describe("CLI against the live database", () => {
       expect(JSON.parse(cli(path, "history", "111@s.whatsapp.net", "--account", "a"))).toEqual([]);
       cli(path, "backfill", "111@s.whatsapp.net", "--account", "b", "--wait", "0");
       expect(db.getPendingBackfills("b")).toHaveLength(1);
+      expect(db.getPendingBackfills("b")[0].value).not.toHaveProperty("cutoffTimestamp");
       expect(db.getStats({ accountId: "b" }).totalMessages).toBe(1);
+    } finally { db.close(); }
+  }, 30_000);
+
+  it("queues a rolling backfill cutoff and skips conversations already past it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wa-cli-backfill-")); dirs.push(dir);
+    const path = join(dir, "messages.db");
+    const db = await ObserverDB.create(path);
+    const conversationId = "111@s.whatsapp.net";
+    const week = 7 * 24 * 60 * 60 * 1000;
+    const start = Date.now();
+    try {
+      db.insertMessage({ messageId: "anchor", accountId: "a", sender: "+111", conversationId,
+        isGroup: false, timestamp: start });
+      const backfill = (...flags: string[]) => cli(path, "backfill", conversationId, "--account", "a", ...flags);
+      expect(backfill("--days=7")).toContain("Backfill request queued");
+      const [request] = db.getPendingBackfills("a");
+      const cutoffTimestamp = Number(request.value.cutoffTimestamp);
+      expect(cutoffTimestamp).toBeGreaterThanOrEqual(start - week);
+      expect(cutoffTimestamp).toBeLessThanOrEqual(Date.now() - week);
+      db.deleteSetting(request.key);
+
+      db.insertMessage({ messageId: "older", accountId: "a", sender: "+111", conversationId,
+        isGroup: false, timestamp: start - week - 1 });
+      expect(backfill("--days=7")).toContain("reached the 7-day cutoff");
+      expect(() => backfill("--days=0")).toThrow();
+      expect(db.getPendingBackfills("a")).toHaveLength(0);
     } finally { db.close(); }
   }, 30_000);
 });

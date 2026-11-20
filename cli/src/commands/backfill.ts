@@ -10,6 +10,7 @@ export default class Backfill extends Command {
 
   static override examples = [
     "wa-pro backfill 4917600000001@s.whatsapp.net --account michael",
+    "wa-pro backfill 4917600000001@s.whatsapp.net --account michael --days=7",
     "wa-pro backfill 120363406173840067@g.us --account michael --count 50 --requests 3",
   ];
 
@@ -24,6 +25,10 @@ export default class Backfill extends Command {
     account: Flags.string({
       required: true,
       description: "Observer account ID (must be connected to gateway)",
+    }),
+    days: Flags.integer({
+      min: 1,
+      description: "Only import messages from the past N days",
     }),
     count: Flags.integer({
       min: 1, max: 50,
@@ -46,6 +51,9 @@ export default class Backfill extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Backfill);
     const count = Math.min(flags.count, 50);
+    const cutoffTimestamp = flags.days === undefined
+      ? undefined
+      : Math.max(0, Date.now() - flags.days * 24 * 60 * 60 * 1000);
 
     const dbPath = resolveDbPath(flags.db);
     const db = await openDb(dbPath);
@@ -70,6 +78,11 @@ export default class Backfill extends Command {
 
         const anchor = db.getOldestMessage(args.conversation, flags.account);
         if (!anchor) break;
+        if (cutoffTimestamp !== undefined && Number(anchor.timestamp) <= cutoffTimestamp) {
+          process.stdout.write(`Backfill anchor has reached the ${flags.days}-day cutoff.\n`);
+          if (i === 0) return;
+          break;
+        }
 
         process.stdout.write(
           `Request ${i + 1}/${flags.requests}: fetching ${count} messages before ` +
@@ -77,12 +90,15 @@ export default class Backfill extends Command {
         );
 
         // Write backfill request to DB — the observer monitor polls for these
-        db.setSetting(`backfill.pending.${flags.account}.${Date.now()}`, JSON.stringify({
+        // Older gateways only process the unbounded queue.
+        const queue = cutoffTimestamp === undefined ? "pending" : "pending-bounded";
+        db.setSetting(`backfill.${queue}.${flags.account}.${Date.now()}`, JSON.stringify({
           accountId: flags.account,
           conversationId: args.conversation,
           count,
           anchorMessageId: anchor.message_id,
           anchorTimestamp: anchor.timestamp,
+          cutoffTimestamp,
           requestedAt: Date.now(),
         }));
         db.flush();

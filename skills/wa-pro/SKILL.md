@@ -66,10 +66,10 @@ Link a WhatsApp account by QR code. Default shows QR in terminal. Use `--format 
 ### Backfill history
 
 ```bash
-wa-pro backfill <conversation-jid> --account <id> [--count <N>] [--requests <N>] [--wait <seconds>]
+wa-pro backfill <conversation-jid> --account <id> [--days <N>] [--count <N>] [--requests <N>] [--wait <seconds>]
 ```
 
-Request older messages for a conversation from WhatsApp. Requires the gateway running and the phone online. Use `wa-pro conversations` to find JIDs. Default: 50 messages per request, max 50.
+Request older messages for a conversation from WhatsApp. Requires the gateway running and the phone online. Use `wa-pro conversations` to find JIDs. Default: 50 messages per request, max 50. Use `--days=7` to import only messages from the past seven days within those request limits.
 
 ### Transcribe a voice note
 
