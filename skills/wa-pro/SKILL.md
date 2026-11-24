@@ -32,7 +32,7 @@ Do NOT confuse with normal WhatsApp chat routing — this is for querying the pa
 ### Search messages
 
 ```bash
-wa-pro search "<query>" [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
+wa-pro search "<query>" [--account <id>] [--sender <name>] [--group <name>] [--after <date>] [--before <date>] [--limit <N>]
 ```
 
 ### Conversation history
@@ -66,10 +66,18 @@ Link a WhatsApp account by QR code. Default shows QR in terminal. Use `--format 
 ### Backfill history
 
 ```bash
-wa-pro backfill <conversation-jid> --account <id> [--count <N>] [--requests <N>] [--wait <seconds>]
+wa-pro backfill <conversation-jid> --account <id> [--days <N>] [--count <N>] [--requests <N>] [--wait <seconds>]
 ```
 
-Request older messages for a conversation from WhatsApp. Requires the gateway running and the phone online. Use `wa-pro conversations` to find JIDs. Default: 50 messages per request, max 50.
+Request older messages for a conversation from WhatsApp. Requires the gateway running and the phone online. Use `wa-pro conversations` to find JIDs. Default: 50 messages per request, max 50. Use `--days=7` to import only messages from the past seven days within those request limits.
+
+### Transcribe a voice note
+
+```bash
+wa-pro transcribe <id>
+```
+
+Use the numeric database row `id` from recent/history JSON output. This queues work for the running gateway's background worker; it does not transcribe in the CLI or on receipt. OpenClaw's audio transcription must be configured. Read `transcript`, `transcription_status`, `transcription_error` and `transcribed_at` in recent/history JSON to check the result. The original audio row and content remain intact, and completed transcripts are searchable with `wa-pro search`. Repeat the command to retry a failed job. Active and completed jobs are not duplicated.
 
 ### List known contacts
 
@@ -145,7 +153,7 @@ All config commands support `--account <id>` for per-account overrides. Without 
 
 ## Notes
 
-- Output is JSON by default for query commands, table for accounts/config. Use `--format` to override.
+- Query and account commands output JSON by default. Use `--format table` for tables. Config commands print their setting or a confirmation.
 - All query outputs include the `account_id` field to distinguish WhatsApp accounts.
 - Dates use ISO 8601 format (e.g., `2026-03-01`).
 - JIDs: direct chats look like `<number>@s.whatsapp.net`; groups look like `<id>@g.us`.

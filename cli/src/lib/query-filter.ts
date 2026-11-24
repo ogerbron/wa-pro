@@ -10,7 +10,7 @@ export function applyRetrieveFilter(
   mode: ObserverMode,
   filters: ObserverFilters,
 ): Array<Record<string, unknown>> {
-  if (mode !== "record-all-retrieve-filtered") {
+  if (mode === "record-all-retrieve-all") {
     return results;
   }
 
@@ -28,7 +28,7 @@ export function applyRetrieveFilter(
  * Returns the adjusted limit for the DB query.
  */
 export function adjustLimitForFiltering(requestedLimit: number, mode: ObserverMode): number {
-  if (mode !== "record-all-retrieve-filtered") {
+  if (mode === "record-all-retrieve-all") {
     return requestedLimit;
   }
   return requestedLimit * 3;

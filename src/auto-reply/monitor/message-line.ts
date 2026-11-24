@@ -1,52 +1,51 @@
-import { resolveMessagePrefix } from "openclaw/plugin-sdk/agent-runtime";
 import {
-  formatInboundEnvelope,
-  type EnvelopeFormatOptions,
-} from "openclaw/plugin-sdk/channel-inbound";
-import type { loadConfig } from "openclaw/plugin-sdk/config-runtime";
-import { getChannelConfig } from "../../channel-config.js";
-import type { WebInboundMsg } from "../types.js";
+  getPrimaryIdentityId,
+  getReplyContext,
+  getSenderIdentity,
+  type WhatsAppReplyContext,
+} from "../../identity.js";
+import { requireWhatsAppInboundAdmission } from "../../inbound/admission.js";
+import type { AdmittedWebInboundMessage } from "../../inbound/types.js";
+import { formatInboundEnvelope, type EnvelopeFormatOptions } from "./message-line.runtime.js";
 
-export function formatReplyContext(msg: WebInboundMsg) {
-  if (!msg.replyToBody) {
+function formatReplyTarget(replyTo: WhatsAppReplyContext | null) {
+  if (!replyTo?.body) {
     return null;
   }
-  const sender = msg.replyToSender ?? "unknown sender";
-  const idPart = msg.replyToId ? ` id:${msg.replyToId}` : "";
-  return `[Replying to ${sender}${idPart}]\n${msg.replyToBody}\n[/Replying]`;
+  const sender = replyTo.sender?.label ?? replyTo.sender?.e164 ?? "unknown sender";
+  const idPart = replyTo.id ? ` id:${replyTo.id}` : "";
+  return `[Replying to ${sender}${idPart}]\n${replyTo.body}\n[/Replying]`;
 }
 
 export function buildInboundLine(params: {
-  cfg: ReturnType<typeof loadConfig>;
-  msg: WebInboundMsg;
-  agentId: string;
+  msg: AdmittedWebInboundMessage;
   previousTimestamp?: number;
   envelope?: EnvelopeFormatOptions;
+  visibleReplyTo?: WhatsAppReplyContext | null;
 }) {
-  const { cfg, msg, agentId, previousTimestamp, envelope } = params;
-  // WhatsApp inbound prefix: channels.whatsapp.messagePrefix > legacy messages.messagePrefix > identity/defaults
-  const messagePrefix = resolveMessagePrefix(cfg, agentId, {
-    configured: getChannelConfig(cfg)?.messagePrefix,
-    hasAllowFrom: (getChannelConfig(cfg)?.allowFrom?.length ?? 0) > 0,
-  });
-  const prefixStr = messagePrefix ? `${messagePrefix} ` : "";
-  const replyContext = formatReplyContext(msg);
-  const baseLine = `${prefixStr}${msg.body}${replyContext ? `\n\n${replyContext}` : ""}`;
+  const { msg, previousTimestamp, envelope } = params;
+  const admission = requireWhatsAppInboundAdmission(msg);
+  const conversationId = admission.conversation.id;
+  const conversationKind = admission.conversation.kind;
+  const replyContext = formatReplyTarget(
+    params.visibleReplyTo === undefined ? getReplyContext(msg) : params.visibleReplyTo,
+  );
+  const baseLine = `${msg.payload.body}${replyContext ? `\n\n${replyContext}` : ""}`;
+  const sender = getSenderIdentity(msg);
 
-  // Wrap with standardized envelope for the agent.
   return formatInboundEnvelope({
     channel: "WhatsApp",
-    from: msg.chatType === "group" ? msg.from : msg.from?.replace(/^whatsapp:/, ""),
-    timestamp: msg.timestamp,
+    from: conversationKind === "group" ? conversationId : conversationId.replace(/^whatsapp(?:-pro)?:/, ""),
+    timestamp: msg.event.timestamp,
     body: baseLine,
-    chatType: msg.chatType,
+    chatType: conversationKind,
     sender: {
-      name: msg.senderName,
-      e164: msg.senderE164,
-      id: msg.senderJid,
+      name: sender.name ?? undefined,
+      e164: sender.e164 ?? undefined,
+      id: getPrimaryIdentityId(sender) ?? undefined,
     },
     previousTimestamp,
     envelope,
-    fromMe: msg.fromMe,
+    fromMe: msg.platform.fromMe,
   });
 }

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { WhatsAppConfigSchema, type OpenClawConfig } from "./runtime-api.js";
+import { WhatsAppConfigSchema } from "../config-api.js";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 /**
  * Zod schema for the observer-specific section of the channel config.
@@ -21,15 +22,14 @@ export const ObserverConfigSchema = z.object({
       allowlist: z.array(z.string()).optional(),
     })
     .optional(),
-  retentionDays: z.number().optional(),
+  retentionDays: z.number().int().nonnegative().optional(),
 });
 
 /**
  * Full channel config schema for "whatsapp-pro".
  *
  * Extends the standard WhatsApp config schema with observer fields.
- * Since WhatsAppConfigSchema uses .strict().superRefine() we cannot call
- * .extend() on it directly, so we reconstruct via .passthrough() + merge.
+ * safeExtend preserves the native schema refinements and strict validation.
  */
 /**
  * Install/uninstall metadata persisted in the channel config.
@@ -38,12 +38,10 @@ export const ChannelMetaSchema = z.object({
   previousWhatsappEnabled: z.boolean().optional(),
 });
 
-export const WhatsAppProConfigSchema = WhatsAppConfigSchema.passthrough().and(
-  z.object({
-    observer: ObserverConfigSchema.optional(),
-    meta: ChannelMetaSchema.optional(),
-  }),
-);
+export const WhatsAppProConfigSchema = WhatsAppConfigSchema.safeExtend({
+  observer: ObserverConfigSchema.optional(),
+  meta: ChannelMetaSchema.optional(),
+});
 
 /** Inferred TypeScript type for the full whatsapp-pro channel config. */
 export type WhatsAppProChannelConfig = z.infer<typeof WhatsAppProConfigSchema>;

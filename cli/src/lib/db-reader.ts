@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { ObserverDB } from "../../../src/observer/db.js";
 import { readObserverConfig } from "./config-reader.js";
 
-const DEFAULT_DB_PATH = join(homedir(), ".openclaw", "whatsapp-observer", "messages.db");
+const DEFAULT_DB_PATH = join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "whatsapp-observer", "messages.db");
 
 /**
  * Resolves the DB path from (in priority order):
@@ -24,7 +24,7 @@ export function resolveDbPath(flagValue: string | undefined): string {
 }
 
 /**
- * Opens the observer DB in read-only mode.
+ * Opens the shared observer SQLite database.
  * Throws a user-friendly error if the DB file doesn't exist.
  */
 export async function openDb(dbPath: string): Promise<ObserverDB> {

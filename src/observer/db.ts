@@ -1,5 +1,6 @@
-import initSqlJs, { type Database } from "sql.js";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { isAllowed, isBlocked } from "./filter.js";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type {
   ConversationSummary,
@@ -9,6 +10,7 @@ import type {
   ObserverSettings,
   ObserverStats,
   StatsGroupByResult,
+  TranscriptionJob,
 } from "./types.js";
 import { DEFAULT_OBSERVER_MODE, OBSERVER_MODES } from "./types.js";
 
@@ -16,6 +18,7 @@ const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id TEXT,
+  from_me INTEGER NOT NULL DEFAULT 0,
   account_id TEXT NOT NULL,
   sender TEXT NOT NULL,
   sender_name TEXT,
@@ -28,6 +31,10 @@ CREATE TABLE IF NOT EXISTS messages (
   media_type TEXT,
   media_path TEXT,
   media_mime TEXT,
+  transcript TEXT,
+  transcription_status TEXT NOT NULL DEFAULT 'none',
+  transcription_error TEXT,
+  transcribed_at INTEGER,
   message_type TEXT NOT NULL DEFAULT 'message',
   ref_message_id TEXT,
   source TEXT NOT NULL DEFAULT 'observer',
@@ -48,7 +55,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
-  jid TEXT PRIMARY KEY,
+  jid TEXT NOT NULL,
   account_id TEXT NOT NULL,
   phone TEXT,
   push_name TEXT,
@@ -56,7 +63,8 @@ CREATE TABLE IF NOT EXISTS contacts (
   is_group INTEGER NOT NULL DEFAULT 0,
   group_subject TEXT,
   group_description TEXT,
-  updated_at INTEGER NOT NULL DEFAULT 0
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (jid, account_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
@@ -64,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
 `;
 
 const MIGRATION_COLUMNS = [
+  "ALTER TABLE messages ADD COLUMN from_me INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'message';",
   "ALTER TABLE messages ADD COLUMN ref_message_id TEXT;",
   "ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'observer';",
@@ -71,103 +80,139 @@ const MIGRATION_COLUMNS = [
 
 const FTS_SETUP = [
   `CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content, sender_name, group_name,
+    content, sender_name, group_name, transcript,
     content='messages', content_rowid='id'
   );`,
   `CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content, sender_name, group_name)
-    VALUES (new.id, new.content, new.sender_name, new.group_name);
+    INSERT INTO messages_fts(rowid, content, sender_name, group_name, transcript)
+    VALUES (new.id, new.content, new.sender_name, new.group_name, new.transcript);
   END;`,
   `CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name)
-    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name);
+    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name, transcript)
+    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name, old.transcript);
   END;`,
-  `CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name)
-    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name);
-    INSERT INTO messages_fts(rowid, content, sender_name, group_name)
-    VALUES (new.id, new.content, new.sender_name, new.group_name);
+  `CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF content, sender_name, group_name, transcript ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, group_name, transcript)
+    VALUES ('delete', old.id, old.content, old.sender_name, old.group_name, old.transcript);
+    INSERT INTO messages_fts(rowid, content, sender_name, group_name, transcript)
+    VALUES (new.id, new.content, new.sender_name, new.group_name, new.transcript);
   END;`,
 ];
 
 const INSERT_SQL = `
 INSERT OR IGNORE INTO messages (
-  message_id, account_id, sender, sender_name, sender_e164,
+  message_id, from_me, account_id, sender, sender_name, sender_e164,
   conversation_id, is_group, group_id, group_name,
   content, media_type, media_path, media_mime, timestamp,
   message_type, ref_message_id, source, logged_at
 ) VALUES (
-  :messageId, :accountId, :sender, :senderName, :senderE164,
+  :messageId, :fromMe, :accountId, :sender, :senderName, :senderE164,
   :conversationId, :isGroup, :groupId, :groupName,
   :content, :mediaType, :mediaPath, :mediaMime, :timestamp,
   :messageType, :refMessageId, :source, :loggedAt
 )`;
 
-// Pre-load WASM — must be awaited before creating ObserverDB
-let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
-export function preloadSqlJs(): ReturnType<typeof initSqlJs> {
-  if (!sqlJsPromise) {
-    sqlJsPromise = initSqlJs();
-  }
-  return sqlJsPromise;
-}
-// Start loading immediately on import
-preloadSqlJs();
-
 export class ObserverDB {
-  private db: Database;
-  private dbPath: string | null;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private db: DatabaseSync;
+  private visibilitySettings = new Map<string, ObserverSettings>();
+  private queryDepth = 0;
 
-  /**
-   * Create an ObserverDB. Call `await preloadSqlJs()` first to ensure
-   * the WASM module is ready, then this constructor is synchronous.
-   */
-  constructor(db: Database, dbPath: string | null) {
+  constructor(db: DatabaseSync) {
     this.db = db;
-    this.dbPath = dbPath;
     this.init();
+    this.db.function("observer_visible", (accountId, e164, sender, conversationId) => {
+      const id = String(accountId);
+      let settings = this.visibilitySettings.get(id);
+      if (!settings) {
+        settings = this.getAccountSettings(id);
+        this.visibilitySettings.set(id, settings);
+      }
+      if (settings.mode === "record-all-retrieve-all") return 1;
+      const identity = String(e164 ?? sender);
+      return !isBlocked(identity, String(conversationId), settings.filters) &&
+        isAllowed(identity, String(conversationId), settings.filters) ? 1 : 0;
+    });
+    this.db.exec(`CREATE TEMP VIEW visible_messages AS SELECT * FROM messages
+      WHERE observer_visible(account_id, sender_e164, sender, conversation_id) = 1`);
   }
 
-  static async create(dbPath: string | ":memory:"): Promise<ObserverDB> {
-    const SQL = await preloadSqlJs();
-    let db: Database;
-    if (dbPath === ":memory:") {
-      db = new SQL.Database();
-      return new ObserverDB(db, null);
-    }
+  static async create(dbPath: string): Promise<ObserverDB> {
+    if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA busy_timeout = 5000");
     try {
-      const buffer = readFileSync(dbPath);
-      db = new SQL.Database(buffer);
-    } catch {
-      mkdirSync(dirname(dbPath), { recursive: true });
-      db = new SQL.Database();
+      return new ObserverDB(db);
+    } catch (error) {
+      db.close();
+      throw error;
     }
-    return new ObserverDB(db, dbPath);
+  }
+
+  private run(sql: string, binds: Record<string, unknown> = {}): void {
+    this.db.prepare(sql).run(binds as Record<string, SQLInputValue>);
   }
 
   private ftsEnabled = false;
 
   private init(): void {
-    this.db.run("PRAGMA journal_mode = WAL;");
-    this.db.run("PRAGMA foreign_keys = ON;");
+    this.run("PRAGMA journal_mode = WAL;");
+    this.run("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA_SQL);
+    const contactColumns = this.query("PRAGMA table_info(contacts)");
+    if (!contactColumns.some((column) => column.name === "account_id" && Number(column.pk) > 0)) {
+      this.db.exec(`BEGIN IMMEDIATE;
+        ALTER TABLE contacts RENAME TO contacts_legacy;
+        ${SCHEMA_SQL}
+        INSERT INTO contacts SELECT * FROM contacts_legacy;
+        DROP TABLE contacts_legacy;
+        CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
+        CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+        COMMIT;`);
+    }
     for (const stmt of MIGRATION_COLUMNS) {
       try {
-        this.db.run(stmt);
+        this.run(stmt);
       } catch {
         // Column already exists
       }
     }
-    // FTS5 setup — may fail if sql.js was built without FTS5 support
-    for (const stmt of FTS_SETUP) {
-      try {
-        this.db.run(stmt);
-        this.ftsEnabled = true;
-      } catch {
-        this.ftsEnabled = false;
-        break;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = this.query("PRAGMA table_info(messages)");
+      for (const [name, definition] of Object.entries({
+        transcript: "TEXT",
+        transcription_status: "TEXT NOT NULL DEFAULT 'none'",
+        transcription_error: "TEXT",
+        transcribed_at: "INTEGER",
+      })) {
+        if (!columns.some(column => column.name === name)) {
+          this.run(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
+        }
       }
+      this.run("CREATE INDEX IF NOT EXISTS idx_messages_transcription_pending ON messages(id) WHERE transcription_status = 'pending'");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    // Rebuild old FTS indexes atomically so transcripts are searchable too.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const ftsColumns = this.query("PRAGMA table_info(messages_fts)");
+      const rebuild = !ftsColumns.some(column => column.name === "transcript");
+      if (ftsColumns.length && rebuild) {
+        this.db.exec(`DROP TRIGGER IF EXISTS messages_fts_insert;
+          DROP TRIGGER IF EXISTS messages_fts_delete;
+          DROP TRIGGER IF EXISTS messages_fts_update;
+          DROP TABLE messages_fts;`);
+      }
+      for (const stmt of FTS_SETUP) this.run(stmt);
+      if (rebuild) this.run("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+      this.db.exec("COMMIT");
+      this.ftsEnabled = true;
+    } catch {
+      this.db.exec("ROLLBACK");
+      this.ftsEnabled = false;
     }
   }
 
@@ -182,16 +227,14 @@ export class ObserverDB {
   }
 
   setSetting(key: string, value: string): void {
-    this.db.run(
+    this.run(
       "INSERT OR REPLACE INTO settings (key, value) VALUES (:key, :value)",
       { ":key": key, ":value": value },
     );
-    this.scheduleSave();
   }
 
   deleteSetting(key: string): void {
-    this.db.run("DELETE FROM settings WHERE key = :key", { ":key": key });
-    this.scheduleSave();
+    this.run("DELETE FROM settings WHERE key = :key", { ":key": key });
   }
 
   // ── Scoped settings helpers ──────────────────────────────────────
@@ -301,9 +344,17 @@ export class ObserverDB {
     groupSubject?: string;
     groupDescription?: string;
   }): void {
-    this.db.run(
-      `INSERT OR REPLACE INTO contacts (jid, account_id, phone, push_name, business_name, is_group, group_subject, group_description, updated_at)
-       VALUES (:jid, :accountId, :phone, :pushName, :businessName, :isGroup, :groupSubject, :groupDescription, :updatedAt)`,
+    this.run(
+      `INSERT INTO contacts (jid, account_id, phone, push_name, business_name, is_group, group_subject, group_description, updated_at)
+       VALUES (:jid, :accountId, :phone, :pushName, :businessName, :isGroup, :groupSubject, :groupDescription, :updatedAt)
+       ON CONFLICT(jid, account_id) DO UPDATE SET
+         phone = COALESCE(excluded.phone, contacts.phone),
+         push_name = COALESCE(excluded.push_name, contacts.push_name),
+         business_name = COALESCE(excluded.business_name, contacts.business_name),
+         is_group = MAX(excluded.is_group, contacts.is_group),
+         group_subject = COALESCE(excluded.group_subject, contacts.group_subject),
+         group_description = COALESCE(excluded.group_description, contacts.group_description),
+         updated_at = excluded.updated_at`,
       {
         ":jid": contact.jid,
         ":accountId": contact.accountId,
@@ -316,11 +367,10 @@ export class ObserverDB {
         ":updatedAt": Date.now(),
       },
     );
-    this.scheduleSave();
   }
 
-  getContact(jid: string): Record<string, unknown> | undefined {
-    const rows = this.query("SELECT * FROM contacts WHERE jid = :jid", { ":jid": jid });
+  getContact(jid: string, accountId?: string): Record<string, unknown> | undefined {
+    const rows = this.query(`SELECT * FROM contacts WHERE jid = :jid${accountId ? " AND account_id = :accountId" : ""}`, { ":jid": jid, ...(accountId ? { ":accountId": accountId } : {}) });
     return rows[0];
   }
 
@@ -348,8 +398,8 @@ export class ObserverDB {
   }
 
   /** Resolve a JID to a display name using the contacts table. */
-  resolveContactName(jid: string): string | undefined {
-    const contact = this.getContact(jid);
+  resolveContactName(jid: string, accountId?: string): string | undefined {
+    const contact = this.getContact(jid, accountId);
     if (!contact) return undefined;
     return (contact.push_name as string)
       ?? (contact.business_name as string)
@@ -363,6 +413,7 @@ export class ObserverDB {
   /** Full-text search using FTS5 when available, LIKE fallback otherwise. */
   searchFts(params: {
     query: string;
+    conversationId?: string;
     sender?: string;
     group?: string;
     afterDate?: number;
@@ -370,7 +421,7 @@ export class ObserverDB {
     accountId?: string;
     limit?: number;
   }): Array<Record<string, unknown>> {
-    if (this.ftsEnabled) {
+    if (this.ftsEnabled && params.query.trim()) {
       return this.searchWithFts5(params);
     }
     return this.search(params);
@@ -378,6 +429,7 @@ export class ObserverDB {
 
   private searchWithFts5(params: {
     query: string;
+    conversationId?: string;
     sender?: string;
     group?: string;
     afterDate?: number;
@@ -387,9 +439,13 @@ export class ObserverDB {
   }): Array<Record<string, unknown>> {
     const conditions: string[] = ["messages_fts MATCH :ftsQuery"];
     const binds: Record<string, unknown> = {
-      ":ftsQuery": params.query.split(/\s+/).filter(Boolean).map(t => `"${t}"`).join(" OR "),
+      ":ftsQuery": params.query.split(/\s+/).filter(Boolean).map(t => `"${t.replaceAll('"', '""')}"`).join(" OR "),
     };
 
+    if (params.conversationId) {
+      conditions.push("m.conversation_id = :conversationId");
+      binds[":conversationId"] = params.conversationId;
+    }
     if (params.sender) {
       conditions.push("(m.sender = :sender OR m.sender_e164 = :sender OR m.sender_name LIKE :senderLike)");
       binds[":sender"] = params.sender;
@@ -417,7 +473,7 @@ export class ObserverDB {
     const where = conditions.join(" AND ");
 
     return this.query(
-      `SELECT m.* FROM messages m
+      `SELECT m.* FROM visible_messages m
        JOIN messages_fts ON messages_fts.rowid = m.id
        WHERE ${where}
        ORDER BY m.timestamp DESC
@@ -426,11 +482,51 @@ export class ObserverDB {
     );
   }
 
+  // ── Asynchronous audio transcription ─────────────────────────────
+
+  queueTranscription(id: number): Record<string, unknown> {
+    const row = this.query("SELECT * FROM visible_messages WHERE id = :id", { ":id": id })[0];
+    if (!row) throw new Error("Message not found or not visible");
+    if (row.media_type !== "audio") throw new Error("Message is not an audio message");
+    if (!row.media_path) throw new Error("Audio message has no downloaded file");
+    this.run(`UPDATE messages SET transcription_status = 'pending', transcription_error = NULL
+      WHERE id = :id AND transcription_status IN ('none', 'failed')`, { ":id": id });
+    return this.query("SELECT * FROM visible_messages WHERE id = :id", { ":id": id })[0];
+  }
+
+  /** Only the gateway's single transcription worker recovers interrupted claims. */
+  recoverInterruptedTranscriptions(): void {
+    this.run("UPDATE messages SET transcription_status = 'pending' WHERE transcription_status = 'processing'");
+  }
+
+  claimNextTranscription(): TranscriptionJob | undefined {
+    const row = this.query(`UPDATE messages SET transcription_status = 'processing'
+      WHERE id = (SELECT id FROM visible_messages WHERE transcription_status = 'pending'
+        ORDER BY id LIMIT 1) AND transcription_status = 'pending'
+      RETURNING id, media_path, media_mime`)[0];
+    return row ? { id: Number(row.id), mediaPath: String(row.media_path),
+      mediaMime: row.media_mime ? String(row.media_mime) : undefined } : undefined;
+  }
+
+  completeTranscription(id: number, text: string): void {
+    this.run(`UPDATE messages SET transcript = :text, transcription_status = 'completed',
+      transcription_error = NULL, transcribed_at = :now WHERE id = :id AND transcription_status = 'processing'`,
+    { ":id": id, ":text": text, ":now": Date.now() });
+  }
+
+  failTranscription(id: number, error: string): void {
+    this.run(`UPDATE messages SET transcription_status = 'failed', transcription_error = :error
+      WHERE id = :id AND transcription_status = 'processing'`, { ":id": id, ":error": error });
+  }
+
   /** Get pending backfill requests for an account. */
   getPendingBackfills(accountId: string): Array<{ key: string; value: Record<string, unknown> }> {
     const rows = this.query(
-      "SELECT key, value FROM settings WHERE key LIKE :prefix",
-      { ":prefix": `backfill.pending.${accountId}.%` },
+      "SELECT key, value FROM settings WHERE key LIKE :prefix OR key LIKE :boundedPrefix",
+      {
+        ":prefix": `backfill.pending.${accountId}.%`,
+        ":boundedPrefix": `backfill.pending-bounded.${accountId}.%`,
+      },
     );
     return rows.map((row) => ({
       key: row.key as string,
@@ -440,14 +536,14 @@ export class ObserverDB {
 
   /** Get the oldest message for a conversation (used as anchor for backfill). */
   getOldestMessage(conversationId: string, accountId?: string): Record<string, unknown> | undefined {
-    const conditions = ["conversation_id = :conversationId"];
+    const conditions = ["conversation_id = :conversationId", "message_type IN ('message', 'poll')", "message_id IS NOT NULL"];
     const binds: Record<string, unknown> = { ":conversationId": conversationId };
     if (accountId) {
       conditions.push("account_id = :accountId");
       binds[":accountId"] = accountId;
     }
     const rows = this.query(
-      `SELECT * FROM messages WHERE ${conditions.join(" AND ")} ORDER BY timestamp ASC LIMIT 1`,
+      `SELECT * FROM visible_messages WHERE ${conditions.join(" AND ")} ORDER BY timestamp ASC LIMIT 1`,
       binds,
     );
     return rows[0];
@@ -469,27 +565,13 @@ export class ObserverDB {
 
   // ── Persistence ──────────────────────────────────────────────────
 
-  private scheduleSave(): void {
-    if (!this.dbPath || this.saveTimer) return;
-    this.saveTimer = setTimeout(() => {
-      this.saveTimer = null;
-      this.flush();
-    }, 1000);
-  }
-
-  flush(): void {
-    if (!this.dbPath) return;
-    try {
-      const data = this.db.export();
-      writeFileSync(this.dbPath, Buffer.from(data));
-    } catch {
-      // best-effort
-    }
-  }
+  // SQLite commits each write directly; retained for CLI callers.
+  flush(): void {}
 
   insertMessage(msg: ObserverMessage): void {
-    this.db.run(INSERT_SQL, {
+    this.run(INSERT_SQL, {
       ":messageId": msg.messageId ?? null,
+      ":fromMe": msg.fromMe ? 1 : 0,
       ":accountId": msg.accountId,
       ":sender": msg.sender,
       ":senderName": msg.senderName ?? null,
@@ -508,22 +590,21 @@ export class ObserverDB {
       ":source": msg.source ?? "observer",
       ":loggedAt": Date.now(),
     });
-    this.scheduleSave();
   }
 
   private query(sql: string, binds: Record<string, unknown> = {}): Array<Record<string, unknown>> {
-    const stmt = this.db.prepare(sql);
-    stmt.bind(binds);
-    const results: Array<Record<string, unknown>> = [];
-    while (stmt.step()) {
-      results.push(stmt.getAsObject() as Record<string, unknown>);
+    if (this.queryDepth === 0) this.visibilitySettings.clear();
+    this.queryDepth++;
+    try {
+      return this.db.prepare(sql).all(binds as Record<string, SQLInputValue>);
+    } finally {
+      this.queryDepth--;
     }
-    stmt.free();
-    return results;
   }
 
   search(params: {
     query: string;
+    conversationId?: string;
     sender?: string;
     group?: string;
     afterDate?: number;
@@ -536,10 +617,14 @@ export class ObserverDB {
 
     const terms = params.query.split(/\s+/).filter(Boolean);
     for (let i = 0; i < terms.length; i++) {
-      conditions.push(`(m.content LIKE :term${i} OR m.sender_name LIKE :term${i} OR m.group_name LIKE :term${i})`);
+      conditions.push(`(m.content LIKE :term${i} OR m.transcript LIKE :term${i} OR m.sender_name LIKE :term${i} OR m.group_name LIKE :term${i})`);
       binds[`:term${i}`] = `%${terms[i]}%`;
     }
 
+    if (params.conversationId) {
+      conditions.push("m.conversation_id = :conversationId");
+      binds[":conversationId"] = params.conversationId;
+    }
     if (params.sender) {
       conditions.push("(m.sender = :sender OR m.sender_e164 = :sender OR m.sender_name LIKE :senderLike)");
       binds[":sender"] = params.sender;
@@ -572,9 +657,10 @@ export class ObserverDB {
       SELECT m.id, m.message_id, m.account_id, m.sender, m.sender_name,
              m.sender_e164, m.conversation_id, m.is_group, m.group_id,
              m.group_name, m.content, m.media_type, m.media_path,
+             m.transcript, m.transcription_status, m.transcription_error, m.transcribed_at,
              m.timestamp, m.logged_at, m.message_type, m.ref_message_id, m.source
-      FROM messages m
-      WHERE ${conditions.join(" AND ")}
+      FROM visible_messages m
+      WHERE ${(conditions.length ? conditions.join(" AND ") : "1 = 1")}
       ORDER BY m.timestamp DESC
       LIMIT :limit
     `;
@@ -612,8 +698,9 @@ export class ObserverDB {
       SELECT id, message_id, account_id, sender, sender_name,
              sender_e164, conversation_id, is_group, group_id,
              group_name, content, media_type, media_path,
+             transcript, transcription_status, transcription_error, transcribed_at,
              timestamp, logged_at, message_type, ref_message_id, source
-      FROM messages
+      FROM visible_messages
       ${where}
       ORDER BY timestamp DESC
       LIMIT :limit
@@ -652,8 +739,9 @@ export class ObserverDB {
       SELECT id, message_id, account_id, sender, sender_name,
              sender_e164, conversation_id, is_group, group_id,
              group_name, content, media_type, media_path,
+             transcript, transcription_status, transcription_error, transcribed_at,
              timestamp, logged_at, message_type, ref_message_id, source
-      FROM messages
+      FROM visible_messages
       ${where}
       ORDER BY timestamp ASC
       LIMIT :limit
@@ -680,22 +768,22 @@ export class ObserverDB {
     const sql = `
       SELECT
         conversation_id AS conversationId,
-        (SELECT m4.account_id FROM messages m4
-         WHERE m4.conversation_id = messages.conversation_id
+        (SELECT m4.account_id FROM visible_messages m4
+         WHERE m4.conversation_id = visible_messages.conversation_id AND m4.account_id = visible_messages.account_id
          ORDER BY m4.timestamp DESC LIMIT 1) AS accountId,
         MAX(group_name) AS groupName,
-        (SELECT m3.sender_name FROM messages m3
-         WHERE m3.conversation_id = messages.conversation_id
+        (SELECT m3.sender_name FROM visible_messages m3
+         WHERE m3.conversation_id = visible_messages.conversation_id AND m3.account_id = visible_messages.account_id
            AND m3.sender_name IS NOT NULL AND m3.sender_name != ''
          ORDER BY m3.timestamp DESC LIMIT 1) AS contactName,
         COUNT(*) AS messageCount,
         MAX(timestamp) AS lastMessageAt,
-        (SELECT sender FROM messages m2
-         WHERE m2.conversation_id = messages.conversation_id
+        (SELECT sender FROM visible_messages m2
+         WHERE m2.conversation_id = visible_messages.conversation_id AND m2.account_id = visible_messages.account_id
          ORDER BY m2.timestamp DESC LIMIT 1) AS lastSender
-      FROM messages
+      FROM visible_messages
       ${where}
-      GROUP BY conversation_id
+      GROUP BY conversation_id, account_id
       ORDER BY MAX(timestamp) DESC
       LIMIT :limit
     `;
@@ -730,7 +818,7 @@ export class ObserverDB {
         COUNT(DISTINCT conversation_id) AS uniqueConversations,
         MIN(timestamp) AS firstMessageAt,
         MAX(timestamp) AS lastMessageAt
-      FROM messages
+      FROM visible_messages
       ${where}
     `;
 
@@ -763,7 +851,7 @@ export class ObserverDB {
 
       const groupSql = `
         SELECT ${groupExpr} AS key, COUNT(*) AS count
-        FROM messages
+        FROM visible_messages
         ${where}
         GROUP BY ${groupExpr}
         ORDER BY count DESC
@@ -775,21 +863,26 @@ export class ObserverDB {
     return { ...stats, grouped };
   }
 
-  prune(retentionDays: number): number {
+  removeConversation(conversationId: string, accountId?: string): number {
+    const accountFilter = accountId === undefined ? "" : " AND account_id = :accountId";
+    const binds: Record<string, SQLInputValue> = accountId === undefined
+      ? { conversationId }
+      : { conversationId, accountId };
+    const result = this.db.prepare(
+      `DELETE FROM messages WHERE conversation_id = :conversationId${accountFilter}`,
+    ).run(binds);
+    return Number(result.changes);
+  }
+
+  prune(retentionDays: number, accountId?: string): number {
     if (retentionDays <= 0) return 0;
     const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-    this.db.run("DELETE FROM messages WHERE timestamp < :cutoff", { ":cutoff": cutoffMs });
+    this.run(`DELETE FROM messages WHERE timestamp < :cutoff${accountId ? " AND account_id = :accountId" : ""}`, { ":cutoff": cutoffMs, ...(accountId ? { ":accountId": accountId } : {}) });
     const result = this.query("SELECT changes() AS count");
-    this.scheduleSave();
     return (result[0]?.count as number) ?? 0;
   }
 
   close(): void {
-    this.flush();
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
     this.db.close();
   }
 }

@@ -1,3 +1,4 @@
+import JSON5 from "json5";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -10,20 +11,20 @@ export type ResolvedObserverConfig = {
   dbPath: string;
 };
 
-const DEFAULT_CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
-const DEFAULT_DB_PATH = join(homedir(), ".openclaw", "whatsapp-observer", "messages.db");
+const DEFAULT_CONFIG_PATH = join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "openclaw.json");
+const DEFAULT_DB_PATH = join(process.env.OPENCLAW_STATE_DIR ?? join(homedir(), ".openclaw"), "whatsapp-observer", "messages.db");
 
 /**
  * Reads the openclaw config file and extracts observer settings.
  * Falls back to safe defaults if the file is missing or malformed.
  */
 export function readObserverConfig(configPath?: string): ResolvedObserverConfig {
-  const filePath = configPath ?? DEFAULT_CONFIG_PATH;
+  const filePath = configPath ?? process.env.OPENCLAW_CONFIG_PATH ?? DEFAULT_CONFIG_PATH;
 
   let config: Record<string, unknown>;
   try {
     const raw = readFileSync(filePath, "utf-8");
-    config = JSON.parse(raw) as Record<string, unknown>;
+    config = JSON5.parse(raw) as Record<string, unknown>;
   } catch {
     return {
       mode: DEFAULT_OBSERVER_MODE,

@@ -4,7 +4,7 @@
   "type": "module",
   "description": "CLI for querying WhatsApp Pro observer messages",
   "bin": {
-    "wa-pro": "./bin/run.ts"
+    "wa-pro": "./bin/run.mjs"
   },
   "oclif": {
     "bin": "wa-pro",
@@ -16,10 +16,14 @@
   },
   "dependencies": {
     "@oclif/core": "^4.2.10",
-    "sql.js": "^1.14.1"
+    "json5": "^2.2.3",
+    "tsx": "^4.19.0",
+    "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
     "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=24.16.0 <25 || >=26.1.0"
   }
 }
